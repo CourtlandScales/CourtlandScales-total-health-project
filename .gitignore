@@ -1,0 +1,16 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# secrets
+.env*
+*.pem
+
+# node
+node_modules/
+
+# firmware build output
+firmware/build/
+firmware/.pio/
