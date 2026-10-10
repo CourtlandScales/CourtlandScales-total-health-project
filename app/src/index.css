@@ -1,0 +1,57 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", sans-serif;
+  --font-display: "Manrope", sans-serif;
+
+  --color-canvas: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-ink: #14201d;
+  --color-muted: #71807b;
+  --color-line: #e4e9e7;
+  --color-brand: #2b7767;
+  --color-brand-dark: #205e52;
+  --color-brand-soft: #e4f1ed;
+  --color-mint: #a9efd5;
+  --color-success: #2e8268;
+  --color-success-soft: #e7f5ef;
+  --color-orange: #c87335;
+  --color-orange-soft: #f9ede3;
+  --color-rose: #c95c6f;
+  --color-rose-soft: #fae8eb;
+  --color-violet: #7664b3;
+  --color-violet-soft: #eeeafb;
+
+  --shadow-card: 0 14px 35px -20px rgb(20 32 29 / 0.25);
+  --shadow-brand: 0 18px 40px -20px rgb(43 119 103 / 0.55);
+  --shadow-status: 0 0 0 4px rgb(46 130 104 / 0.12);
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: var(--color-canvas);
+  }
+
+  body {
+    min-width: 320px;
+    margin: 0;
+    font-family: var(--font-sans);
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    font: inherit;
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+}

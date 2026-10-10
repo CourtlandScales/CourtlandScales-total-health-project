@@ -1,0 +1,10 @@
+{
+  "description": "Tracks wearable device data and displays user progress through a clear, professional interface designed for seamless firmware and web app integration.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
