@@ -98,6 +98,13 @@ def test_parse_lines():
     assert parse_line("B,1") == {"kind": "button", "on": True}
     assert parse_line("I,hello, world") == {"kind": "info", "text": "hello, world"}
     assert parse_line("   ") is None
-    for bad in ("S,abc,1,2,3,4", "S,1,2,3", "R,X,1,2,3", "B,2", "Q,1", "garbage"):
+    # Uno firmware (docs/serial-protocol.md)
+    assert parse_line("D,1042,61250,452,0,0,100,1\r\n") == {
+        "kind": "sample", "ms": 61250, "angle": 45.2, "accel": None, "seq": 1042,
+        "emg": None, "temp": None, "battery": 100, "flags": 1}
+    d = parse_line("D,1,40,-15,734,3312,87,3")
+    assert d["angle"] == -1.5 and d["emg"] == 73.4 and d["temp"] == 33.12
+    assert parse_line("# accelerometer: LIS3DHTR") == {"kind": "info", "text": "accelerometer: LIS3DHTR"}
+    for bad in ("S,abc,1,2,3,4", "S,1,2,3", "R,X,1,2,3", "B,2", "Q,1", "garbage", "D,1,2,3", "D,1,2,x,0,0,100,1"):
         with pytest.raises(ValueError):
             parse_line(bad)

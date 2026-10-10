@@ -10,18 +10,21 @@ Pick the database with DATABASE_URL. Default is the Postgres from docker-compose
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 
 from sqlalchemy import (
-    DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, create_engine, delete, select,
+    DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, create_engine, delete, inspect, select, text,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 import analysis
 
 DEFAULT_URL = "postgresql+psycopg://rihab:rihab_local@localhost:5433/rihab"
+FALLBACK_URL = f"sqlite:///{Path(__file__).resolve().with_name('rihab.db')}"  # used when Docker isn't running
 BACKDATED_AFTER = timedelta(minutes=5)  # performed_at further in the past than this = backdated
 KNEES = ("healthy", "injured")
 
@@ -72,6 +75,7 @@ class Workout(Base):
     status: Mapped[Optional[str]] = mapped_column(String(40))
     summary: Mapped[Optional[str]] = mapped_column(Text)
     baseline_from: Mapped[Optional[datetime]] = mapped_column(UTCDateTime)  # set when healthy reps were borrowed
+    feeling: Mapped[Optional[int]] = mapped_column(Integer)  # post-workout check-in, 1 (very uncomfortable) to 10 (great)
     patient: Mapped[Patient] = relationship(back_populates="workouts")
     measurements: Mapped[list["Measurement"]] = relationship(
         back_populates="workout", cascade="all, delete-orphan", order_by="Measurement.measured_at"
@@ -99,16 +103,42 @@ _Session: Optional[sessionmaker] = None
 
 
 def init_db(url: Optional[str] = None) -> str:
-    """Connect and create any missing tables. Returns the URL used, with the password hidden."""
+    """Connect and create any missing tables. Returns the URL used, with the password hidden.
+
+    With no URL given and the docker-compose Postgres not running, falls back to a local SQLite file.
+    """
+    explicit = url or os.environ.get("DATABASE_URL")
+    try:
+        _connect(explicit or DEFAULT_URL)
+    except OperationalError:
+        if explicit:
+            raise
+        print("Postgres isn't reachable on localhost:5433 (is Docker running? `docker compose up -d`).\n"
+              f"Using a local SQLite file instead: {FALLBACK_URL[len('sqlite:///'):]}")
+        _connect(FALLBACK_URL)
+    return _engine.url.render_as_string(hide_password=True)
+
+
+def _connect(url: str) -> None:
     global _engine, _Session
-    url = url or os.environ.get("DATABASE_URL") or DEFAULT_URL
-    kwargs = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {"pool_pre_ping": True}
+    if url.startswith("sqlite"):
+        kwargs = {"connect_args": {"check_same_thread": False}}
+    else:
+        kwargs = {"pool_pre_ping": True, "connect_args": {"connect_timeout": 3}}
     if _engine is not None:
         _engine.dispose()
     _engine = create_engine(url, **kwargs)
     _Session = sessionmaker(_engine, expire_on_commit=False)
     Base.metadata.create_all(_engine)
-    return _engine.url.render_as_string(hide_password=True)
+    _add_missing_columns(_engine)
+
+
+def _add_missing_columns(engine) -> None:
+    """create_all() never alters existing tables, so add columns introduced after a database was created."""
+    have = {c["name"] for c in inspect(engine).get_columns("workouts")}
+    if "feeling" not in have:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE workouts ADD COLUMN feeling INTEGER"))
 
 
 @contextmanager
@@ -172,6 +202,7 @@ def workout_dict(w: Workout, with_measurements: bool = False) -> dict:
         "healthy_reps": w.healthy_reps, "injured_reps": w.injured_reps,
         "angle_pct": w.angle_pct, "speed_pct": w.speed_pct, "flux_pct": w.flux_pct,
         "score": w.score, "status": w.status, "summary": w.summary, "baseline_from": iso(w.baseline_from),
+        "feeling": w.feeling,
     }
     if with_measurements:
         d["measurements"] = [measurement_dict(m) for m in w.measurements]
@@ -336,6 +367,19 @@ def move_workout(workout_id: int, performed_at) -> dict:
         return workout_dict(w, with_measurements=True)
 
 
+def set_feeling(workout_id: int, score: int) -> dict:
+    """Save the post-workout check-in (1-10). Saving again overwrites it."""
+    if not 1 <= score <= 10:
+        raise ValueError("score must be between 1 and 10")
+    with session() as s:
+        w = s.get(Workout, workout_id)
+        if w is None:
+            raise KeyError(workout_id)
+        w.feeling = score
+        s.commit()
+        return workout_dict(w)
+
+
 def delete_workout(workout_id: int) -> bool:
     with session() as s:
         w = s.get(Workout, workout_id)
@@ -385,6 +429,6 @@ def progress(patient: Optional[str] = None) -> list[dict]:
                 .where(Workout.score.is_not(None)).order_by(Workout.performed_at))
         return [
             {k: d[k] for k in ("id", "performed_at", "is_backdated", "angle_pct", "speed_pct",
-                               "flux_pct", "score", "status", "injured_reps", "baseline_from")}
+                               "flux_pct", "score", "status", "injured_reps", "baseline_from", "feeling")}
             for d in (workout_dict(w) for w in s.scalars(stmt))
         ]

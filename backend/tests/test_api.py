@@ -1,3 +1,5 @@
+import math
+
 from fastapi.testclient import TestClient
 
 import rihab_server
@@ -90,3 +92,59 @@ def test_device_rep_lines_and_bad_lines(fresh_db):
         assert session._bad_lines == 1
         w = client.get(f"/api/workouts/{state['workout_id']}").json()
         assert [m["source"] for m in w["measurements"]] == ["device", "device"]
+
+
+def test_uno_firmware_lines_drive_live_session(fresh_db):
+    """The D lines the Uno sketch prints become samples, reps and a comparison; 'c' calibrates."""
+    sent = []
+    source = SimSource(speed=0.001, seed=4)
+    source.send = sent.append
+    app = create_app(source, database_url=fresh_db)
+
+    def bend(start_ms, rom):  # one 3 s bend-and-straighten then 1 s rest at 25 Hz, as D lines
+        angles = [rom * (1 - math.cos(2 * math.pi * i / 75)) / 2 for i in range(75)] + [0.5] * 25
+        return [f"D,{i},{start_ms + i * 40},{round(a * 10)},0,0,100,1" for i, a in enumerate(angles)]
+
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        source._emit("line", "# accelerometer: LIS3DHTR")
+        ws.send_json({"type": "start"})
+        for line in bend(1000, 130) + bend(5000, 128):
+            source._emit("line", line)
+        # Lines and WebSocket commands reach the server by different paths, so wait for each step to land
+        # before the next; otherwise a healthy bend can be recorded after the switch to the injured knee.
+        reps, seen = collect(ws, "rep", 2)
+        assert all(r["knee"] == "healthy" for r in reps)
+        ws.send_json({"type": "set_knee", "knee": "injured"})
+        while (m := ws.receive_json())["type"] != "state" or m["knee"] != "injured":
+            seen.append(m)
+        for line in bend(9000, 95):
+            source._emit("line", line)
+        c, other = collect(ws, "comparison", 1)
+        seen += other
+        assert 65 < c[0]["angle_pct"] < 80 and c[0]["flux_pct"] is None
+        samples = [m for m in seen if m["type"] == "sample"]
+        assert samples and samples[-1]["battery"] == 100 and samples[-1]["emg"] is None
+        assert any(m["type"] == "log" and "LIS3DHTR" in m["text"] for m in seen)
+
+        ws.send_json({"type": "calibrate"})
+        collect(ws, "log", 1)
+        assert "c" in sent
+        assert app.state.session._bad_lines == 0
+
+
+def test_post_workout_checkin(fresh_db):
+    app = create_app(SimSource(seed=5), database_url=fresh_db)
+    with TestClient(app) as client:
+        w = client.post("/api/workouts", json={"patient": "Alex", "performed_at": "2026-10-01 18:00", "measurements": [
+            {"knee": "injured", "rom_deg": 90, "duration_s": 3.0}]}).json()
+        assert w["feeling"] is None
+
+        r = client.post(f"/api/workouts/{w['id']}/checkin", json={"score": 8})
+        assert r.status_code == 200 and r.json()["feeling"] == 8
+        assert client.post(f"/api/workouts/{w['id']}/checkin", json={"score": 3}).json()["feeling"] == 3
+        assert client.get(f"/api/workouts/{w['id']}").json()["feeling"] == 3
+
+        assert client.post(f"/api/workouts/{w['id']}/checkin", json={"score": 11}).status_code == 422
+        assert client.post(f"/api/workouts/{w['id']}/checkin", json={"score": 0}).status_code == 422
+        assert client.post("/api/workouts/999/checkin", json={"score": 5}).status_code == 404

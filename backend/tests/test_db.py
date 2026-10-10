@@ -73,3 +73,21 @@ def test_patients_are_separate(fresh_db):
     assert w["score"] is None  # Alex's baseline doesn't leak to Sam
     assert {p["name"] for p in db.list_patients()} == {"Alex", "Sam"}
     assert len(db.list_workouts("Sam")) == 1
+
+
+def test_adds_feeling_column_to_an_older_database(tmp_path):
+    import sqlalchemy as sa
+    url = f"sqlite:///{tmp_path / 'old.db'}"
+    engine = sa.create_engine(url)
+    with engine.begin() as conn:  # a workouts table from before the check-in existed
+        conn.execute(sa.text("CREATE TABLE workouts (id INTEGER PRIMARY KEY, patient_id INTEGER)"))
+    engine.dispose()
+    db.init_db(url)
+    assert "feeling" in {c["name"] for c in sa.inspect(db._engine).get_columns("workouts")}
+
+
+def test_falls_back_to_sqlite_when_postgres_is_down(monkeypatch, tmp_path):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(db, "DEFAULT_URL", "postgresql+psycopg://x:y@127.0.0.1:1/none")
+    monkeypatch.setattr(db, "FALLBACK_URL", f"sqlite:///{tmp_path / 'fallback.db'}")
+    assert db.init_db().startswith("sqlite")

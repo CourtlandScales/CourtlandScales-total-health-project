@@ -7,9 +7,20 @@ Sensors -> Arduino --USB--> FastAPI server (Python, on your laptop) --WebSocket/
                       PostgreSQL 16 in Docker (localhost only)
 ```
 
-> **Known gap:** this server reads the `S,` / `R,` / `B,` / `I,` lines described below. The Uno firmware in
-> `firmware/knee_brace_uno/` prints the `D,` lines from `docs/serial-protocol.md`, so the two don't talk
-> to each other yet. Use `--sim` until the parser is updated.
+## Quick start
+
+From the **repo root** (not `backend/` or `app/`), with Python 3.10+ and Node 22 installed:
+
+```
+npm run sim       # simulated patient, no hardware needed
+npm start         # real Arduino, port auto-detected (npm start -- --port COM5 to name it)
+```
+
+The first run creates `backend/.venv`, installs the Python and npm packages, then starts the server and the
+dashboard together (http://localhost:8443). Ctrl+C stops both. If Docker isn't running, the data goes to
+`backend/rihab.db` (SQLite) instead of Postgres, and the server says so when it starts.
+
+The rest of this file is the manual way, plus the details.
 
 ## Setup (one time)
 
@@ -28,9 +39,14 @@ Sensors -> Arduino --USB--> FastAPI server (Python, on your laptop) --WebSocket/
 3. Optional: 6 weeks of backdated demo history so the progress chart isn't empty:
    `python seed.py` (patient "Alex"; `--wipe` to redo, `--weeks 8` for more).
 
-No Docker? Run `$env:DATABASE_URL="sqlite:///rihab.db"` (PowerShell) first to use a local file instead.
+No Docker? Nothing to do: if Postgres isn't reachable and `DATABASE_URL` isn't set, the server falls back to
+`backend/rihab.db`. Set `DATABASE_URL` to choose explicitly (it then fails instead of falling back).
 
 ## Run
+
+Run these from `backend/` with the venv's Python (plain `python` won't have the packages), then start the app
+in a second terminal: `cd app`, `npm install`, `npm run dev`, and open http://localhost:8443.
+The dashboard connects to `http://localhost:8000` by default; set `VITE_RIHAB_SERVER` in `app/.env.local` to change it.
 
 ```
 python rihab_server.py --sim          # simulated patient, no hardware needed
@@ -51,7 +67,7 @@ by default because Docker Desktop on Windows/Mac can't pass a USB device into a 
 | Table | One row per | Key columns |
 | --- | --- | --- |
 | `patients` | patient | name, injury |
-| `workouts` | workout | `performed_at` (backdatable), `recorded_at`, `is_backdated`, rep counts, `angle_pct`, `speed_pct`, `flux_pct`, `score`, `status`, `summary`, `baseline_from` |
+| `workouts` | workout | `performed_at` (backdatable), `recorded_at`, `is_backdated`, rep counts, `angle_pct`, `speed_pct`, `flux_pct`, `score`, `status`, `summary`, `baseline_from`, `feeling` (post-workout check-in, 1–10) |
 | `measurements` | rep | `measured_at`, knee, `rom_deg`, `duration_s`, `flux`, `vision_rom_deg`, `source` (device / python / manual) |
 
 Every rep is saved the moment it happens. The healthy knee is measured once; later workouts borrow the most
@@ -69,12 +85,15 @@ Back up with `docker compose exec db pg_dump -U rihab rihab > rihab_backup.sql`.
 
 | Line | Meaning |
 | --- | --- |
+| `D,<seq>,<ms>,<angle_x10>,<emg_x10>,<temp_x100>,<battery>,<flags>` | What `firmware/knee_brace_uno` prints, 25/s (see `docs/serial-protocol.md`). EMG/temp of 0 = no sensor |
+| `# <text>` | Firmware log line, shown in the app log |
 | `S,<ms>,<angle>,<ax>,<ay>,<az>` | Live sample, 20–50/s. Angle in degrees (0 = straight), accel in g. `S,<ms>,<angle>` also works (no smoothness score then) |
 | `R,<H or I>,<rom_deg>,<duration_ms>,<flux>` | Optional: one rep measured on the Arduino. H = healthy, I = injured |
 | `B,1` / `B,0` | Button started / stopped tracking |
 | `I,<text>` | Any message, shown in the app log |
 
-Python sends back `K,H` / `K,I` (which knee) and `START` / `STOP`. Until an `R` line arrives, Python finds
+Python sends back `K,H` / `K,I` (which knee), `START` / `STOP`, and `c` (calibrate: leg straight now).
+The Uno sketch only acts on `c`; it ignores the rest and streams continuously, and Python decides which reps count. Until an `R` line arrives, Python finds
 reps itself from the `S` lines. Flux = RMS deviation of accel magnitude from a 5-sample moving average, in milli-g.
 
 ## What the numbers mean (Phase 3)
@@ -92,20 +111,22 @@ Score = 50% range + 25% speed + 25% smoothness, each capped at 100. Status: 90+ 
 
 ## Frontend contract
 
-`client/useRihab.js` is a React hook wrapping all of this; `client/LiveSession.jsx` is a working example screen.
+The dashboard uses `app/src/lib/rihab.ts` (typed `useRihab()` hook + REST helpers).
 
 **WebSocket** `ws://localhost:8000/ws`
-- Server → app: `snapshot` (on connect and each new workout), `state`, `sample` (≤30/s), `rep`, `comparison`, `log`
-- App → server: `start_workout {patient, injury?, performed_at?}`, `end_workout`, `set_knee {knee}`, `start`, `stop`, `vision {angle}`
+- Server → app: `snapshot` (on connect and each new workout), `state`, `sample` (≤30/s; `emg`, `temp`, `battery`, `flags` are null when the source doesn't report them), `rep`, `comparison`, `log`
+- App → server: `start_workout {patient, injury?, performed_at?}`, `end_workout`, `set_knee {knee}`, `start`, `stop`, `calibrate`, `vision {angle}`
 
 **REST** `http://localhost:8000/api`
 - `GET /progress?patient=Alex` (one row per analysed workout, oldest first), `GET /workouts?patient=`, `GET /workouts/{id}`
 - `POST /workouts`, `PATCH /workouts/{id}`, `DELETE /workouts/{id}`
+- `POST /workouts/{id}/checkin {"score": 1-10}`: post-workout check-in (1 = very uncomfortable, 10 = felt great); posting again overwrites it
 - `POST /vision {"angle": 92.5}`, `GET /state`, `GET /patients`, `POST /command`
 
 ## Files
 
 ```
+package.json         (repo root) npm start / npm run sim -> scripts/start.mjs
 docker-compose.yml   (repo root) Postgres + optional Adminer / API container
 .env.example         (repo root) database login
 backend/
@@ -113,6 +134,5 @@ backend/
   analysis.py        rep detection + healthy vs injured comparison
   db.py              SQLAlchemy models + every query
   seed.py            backdated demo history
-  client/            useRihab.js hook + LiveSession.jsx example for app/
   tests/             pytest suite
 ```

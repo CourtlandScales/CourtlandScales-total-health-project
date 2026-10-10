@@ -37,6 +37,9 @@ KNEE_TO_CODE = {v: k for k, v in KNEE_CODES.items()}
 def parse_line(text: str) -> Optional[dict]:
     """Parse one line from the Arduino. Returns None for blank lines; raises ValueError for bad ones.
 
+        D,<seq>,<ms>,<angle_x10>,<emg_x10>,<temp_x100>,<battery>,<flags>
+                                                  Uno firmware sample (docs/serial-protocol.md)
+        # <text>                                  Uno firmware log line
         S,<ms>,<angle>,<ax>,<ay>,<az>             live sample
         R,<H|I>,<rom_deg>,<duration_ms>,<flux>    one rep measured on the Arduino
         B,1 / B,0                                 button started / stopped tracking
@@ -45,12 +48,22 @@ def parse_line(text: str) -> Optional[dict]:
     text = text.strip()
     if not text:
         return None
+    if text.startswith("#"):
+        return {"kind": "info", "text": text[1:].strip()}
     kind, _, rest = text.partition(",")
     kind = kind.upper()
     if kind == "I":
         return {"kind": "info", "text": rest}
     parts = rest.split(",") if rest else []
     try:
+        if kind == "D":
+            if len(parts) != 7:
+                raise ValueError
+            seq, ms, angle, emg, temp, battery, flags = (int(p) for p in parts)
+            # emg/temp are 0 until those sensors exist; report "no reading" rather than 0% / 0 °C.
+            return {"kind": "sample", "ms": ms, "angle": angle / 10.0, "accel": None, "seq": seq,
+                    "emg": emg / 10.0 if emg else None, "temp": temp / 100.0 if temp else None,
+                    "battery": battery, "flags": flags}
         if kind == "S":
             if len(parts) == 2:  # angle only, no accelerometer
                 return {"kind": "sample", "ms": int(float(parts[0])), "angle": float(parts[1]), "accel": None}
@@ -265,6 +278,7 @@ class Session:
         self.vision_angle: Optional[float] = None
         self.vision_peak: Optional[float] = None
         self._last_sample_sent = 0.0
+        self._last_t = 0.0              # device time of the last sample, to notice Arduino resets
         self._bad_lines = 0
 
     # ---- outgoing
@@ -315,6 +329,9 @@ class Session:
         kind = msg["kind"]
         if kind == "sample":
             t = msg["ms"] / 1000.0
+            if t < self._last_t:  # the Arduino rebooted (opening the port resets an Uno) and its clock restarted
+                self.detector.reset()
+            self._last_t = t
             if self.tracking and not self.device_reps:
                 rep = self.detector.feed(t, msg["angle"], msg["accel"])
                 if rep:
@@ -324,7 +341,9 @@ class Session:
                 self._last_sample_sent = now
                 ax, ay, az = msg["accel"] or (None, None, None)
                 await self.hub.broadcast({"type": "sample", "t": t, "angle": msg["angle"], "ax": ax, "ay": ay,
-                                          "az": az, "knee": self.knee, "tracking": self.tracking})
+                                          "az": az, "emg": msg.get("emg"), "temp": msg.get("temp"),
+                                          "battery": msg.get("battery"), "flags": msg.get("flags"),
+                                          "knee": self.knee, "tracking": self.tracking})
         elif kind == "rep":
             if not self.device_reps:
                 self.device_reps = True
@@ -392,6 +411,12 @@ class Session:
         self.source.send("STOP")
         await self.send_state()
 
+    async def calibrate(self) -> None:
+        """Tell the brace the leg is straight right now (Uno firmware command 'c')."""
+        self.detector.reset()
+        self.source.send("c")
+        await self.log("Calibrating: hold the leg straight")
+
     def vision(self, angle: float) -> None:
         """Latest knee angle from the skeleton-tracking script; the peak is attached to the next rep."""
         self.vision_angle = angle
@@ -409,6 +434,8 @@ class Session:
             await self.start()
         elif t == "stop":
             await self.stop()
+        elif t == "calibrate":
+            await self.calibrate()
         elif t == "vision":
             self.vision(float(msg["angle"]))
         else:
@@ -435,6 +462,10 @@ class WorkoutIn(BaseModel):
 
 class WorkoutPatch(BaseModel):
     performed_at: str
+
+
+class CheckInIn(BaseModel):
+    score: int = Field(ge=1, le=10)  # 1 = very uncomfortable, 10 = felt great
 
 
 class VisionIn(BaseModel):
@@ -540,6 +571,16 @@ def create_app(source=None, database_url: Optional[str] = None, default_patient:
         if session.workout and session.workout["id"] == workout_id:
             session.workout = w
             session.comparison = db.recompute(workout_id)
+        await hub.broadcast(session.snapshot())
+        return w
+
+    @app.post("/api/workouts/{workout_id}/checkin")
+    async def post_checkin(workout_id: int, body: CheckInIn):
+        """Post-workout check-in: how the patient felt, 1-10. Posting again overwrites it."""
+        try:
+            w = db.set_feeling(workout_id, body.score)
+        except KeyError:
+            raise HTTPException(404, "workout not found")
         await hub.broadcast(session.snapshot())
         return w
 
