@@ -14,3 +14,11 @@ node_modules/
 # firmware build output
 firmware/build/
 firmware/.pio/
+!.env.example
+
+# python backend
+.venv/
+__pycache__/
+.pytest_cache/
+*.db
+rihab_backup.sql

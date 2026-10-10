@@ -1,0 +1,48 @@
+# docker compose up -d                          Postgres only (what you normally want)
+# docker compose --profile tools up -d          + Adminer table browser on http://localhost:8080
+# docker compose --profile api up -d --build    + the API in a container, simulator only
+#
+# Every port is bound to 127.0.0.1, so nothing is reachable from the Wi-Fi.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rihab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rihab_local}
+      POSTGRES_DB: ${POSTGRES_DB:-rihab}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - rihab_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rihab} -d ${POSTGRES_DB:-rihab}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  adminer:
+    image: adminer:4
+    profiles: [tools]
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on: [db]
+
+  api:
+    build: ./backend
+    profiles: [api]
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rihab}:${POSTGRES_PASSWORD:-rihab_local}@db:5432/${POSTGRES_DB:-rihab}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Linux only: give the container the real Arduino instead of the simulator.
+    # devices:
+    #   - /dev/ttyACM0:/dev/ttyACM0
+    # command: ["python", "rihab_server.py", "--port", "/dev/ttyACM0", "--host", "0.0.0.0"]
+
+volumes:
+  rihab_pg:
