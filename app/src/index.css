@@ -1,15 +1,19 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700;800&family=Manrope:wght@600;700;800&display=swap");
+
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "DM Sans", sans-serif;
+  --font-sans: "Inter", sans-serif;
   --font-display: "Manrope", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
   --color-canvas: #f6f7f9;
   --color-surface: #ffffff;
   --color-ink: #14201d;
   --color-muted: #71807b;
   --color-line: #e4e9e7;
+  --color-edge: rgb(0 0 0 / 0.04);
+  --color-night: #14201d;
   --color-brand: #2b7767;
   --color-brand-dark: #205e52;
   --color-brand-soft: #e4f1ed;
@@ -23,9 +27,51 @@
   --color-violet: #7664b3;
   --color-violet-soft: #eeeafb;
 
-  --shadow-card: 0 14px 35px -20px rgb(20 32 29 / 0.25);
   --shadow-brand: 0 18px 40px -20px rgb(43 119 103 / 0.55);
   --shadow-status: 0 0 0 4px rgb(46 130 104 / 0.12);
+}
+
+/* Tailwind copies @theme shadow values straight into the classes, so the shadows that change
+   in dark mode point at these variables instead (`inline` keeps the var() in the class). */
+@theme inline {
+  --shadow-card: var(--elevation-card);
+  --shadow-soft: var(--elevation-soft);
+  --shadow-selected: var(--elevation-selected);
+}
+
+:root {
+  --elevation-card: 0 14px 35px -20px rgb(20 32 29 / 0.25);
+  --elevation-soft: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.03);
+  --elevation-selected: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+/* Dark mode: App.tsx sets data-theme on <html> from the saved choice or the system setting. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-canvas: #0e1513;
+  --color-surface: #161f1c;
+  --color-ink: #e6eeeb;
+  --color-muted: #8d9c97;
+  --color-line: #26322e;
+  --color-edge: rgb(255 255 255 / 0.06);
+  --color-night: #1f2a27;
+  --color-brand: #37907c;
+  --color-brand-dark: #2b7767;
+  --color-brand-soft: #15302a;
+  --color-success: #4cb592;
+  --color-success-soft: #15302a;
+  --color-orange: #e08a4a;
+  --color-orange-soft: #3a2516;
+  --color-rose: #e07a8c;
+  --color-rose-soft: #3a1c22;
+  --color-violet: #8a78cc;
+  --color-violet-soft: #252040;
+
+  /* Shadows barely show on a dark canvas, so hover and selected states glow teal instead. */
+  --elevation-card: 0 0 0 1px rgb(55 144 124 / 0.35), 0 0 28px -6px rgb(55 144 124 / 0.5);
+  --elevation-selected: 0 0 0 1px rgb(55 144 124 / 0.5), 0 0 14px -2px rgb(55 144 124 / 0.55);
+  --elevation-soft: 0 4px 6px -1px rgb(0 0 0 / 0.3), 0 2px 4px -2px rgb(0 0 0 / 0.2);
 }
 
 @layer base {
@@ -53,5 +99,20 @@
   button:focus-visible {
     outline: 2px solid var(--color-brand);
     outline-offset: 2px;
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(46 130 104 / 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgb(46 130 104 / 0); }
+}
+
+.glow-live {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glow-live {
+    animation: none;
   }
 }

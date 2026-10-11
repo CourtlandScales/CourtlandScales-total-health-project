@@ -18,6 +18,7 @@ type IconName =
   | "shoe"
   | "spark"
   | "stop"
+  | "sun"
   | "target"
   | "thermometer"
   | "trend"
@@ -67,6 +68,12 @@ const iconPaths: Record<IconName, ReactNode> = {
   shoe: <path d="M4 6v7c0 1.1.9 2 2 2h3l2 3h8.5a2.5 2.5 0 0 0 0-5H15l-4-2-2-5H4Z" />,
   spark: <path d="m12 2 1.5 5.5L19 9l-5.5 1.5L12 16l-1.5-5.5L5 9l5.5-1.5L12 2Zm6 13 .7 2.3L21 18l-2.3.7L18 21l-.7-2.3L15 18l2.3-.7L18 15Z" />,
   stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+  sun: (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </>
+  ),
   target: (
     <>
       <circle cx="12" cy="12" r="8" />
@@ -231,6 +238,50 @@ function useView() {
   return [view, go] as const;
 }
 
+type Theme = "light" | "dark";
+
+const THEME_KEY = "rihab-theme";
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+const savedTheme = (): Theme | null => {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    return t === "light" || t === "dark" ? t : null;
+  } catch {
+    return null;
+  }
+};
+
+const applyTheme = (theme: Theme) => {
+  document.documentElement.dataset.theme = theme;
+};
+
+// Set before the first render so the page never flashes the wrong theme.
+applyTheme(savedTheme() ?? (systemDark.matches ? "dark" : "light"));
+
+/** Light/dark mode: follows the system setting until the user picks one, then remembers it. */
+function useTheme() {
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme as Theme);
+  useEffect(() => applyTheme(theme), [theme]);
+  useEffect(() => {
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!savedTheme()) setTheme(e.matches ? "dark" : "light");
+    };
+    systemDark.addEventListener("change", onChange);
+    return () => systemDark.removeEventListener("change", onChange);
+  }, []);
+  const toggle = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      // Private browsing: the choice just won't survive a reload.
+    }
+    setTheme(next);
+  };
+  return [theme, toggle] as const;
+}
+
 function RiHabMark() {
   return (
     <span className="relative block h-6 w-3 text-white" aria-hidden="true">
@@ -248,7 +299,7 @@ function Sidebar({ rihab, active, onNavigate }: { rihab: Rihab; active: ViewId; 
   return (
     <aside className="hidden w-64 shrink-0 border-r border-line bg-surface px-5 py-7 lg:flex lg:flex-col">
       <div className="mb-10 flex items-center gap-3 px-2">
-        <div className="flex size-10 items-center justify-center rounded-xl bg-ink text-white shadow-brand">
+        <div className="flex size-10 items-center justify-center rounded-xl bg-night text-white shadow-brand">
           <RiHabMark />
         </div>
         <Text className="font-display text-xl font-bold tracking-tight text-ink">RiHab</Text>
@@ -271,7 +322,7 @@ function Sidebar({ rihab, active, onNavigate }: { rihab: Rihab; active: ViewId; 
       </nav>
 
       <div className="mt-auto">
-        <div className="mb-5 rounded-2xl bg-ink p-4 text-white">
+        <div className="mb-5 rounded-2xl bg-night p-4 text-white">
           <div className="mb-4 flex items-center justify-between">
             <div className="flex size-9 items-center justify-center rounded-xl bg-white/10 text-mint">
               <Icon name="device" />
@@ -317,7 +368,7 @@ type Metric = { label: string; value: string; detail: string; badge: string | nu
 
 function MetricCard({ item }: { item: Metric }) {
   return (
-    <article className="group rounded-2xl border border-line bg-surface p-5 transition hover:-translate-y-0.5 hover:shadow-card">
+    <article className="group rounded-2xl border border-edge bg-surface shadow-soft p-5 transition hover:-translate-y-0.5 hover:shadow-card">
       <div className="mb-5 flex items-start justify-between">
         <div className={`flex size-10 items-center justify-center rounded-xl ${item.tone}`}>
           <Icon name={item.icon} />
@@ -329,9 +380,9 @@ function MetricCard({ item }: { item: Metric }) {
           </div>
         )}
       </div>
-      <Text className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">{item.label}</Text>
+      <Text className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted/80">{item.label}</Text>
       <div className="flex items-end gap-2">
-        <Text className="font-display text-3xl font-bold tracking-tight text-ink">{item.value}</Text>
+        <Text className="font-mono text-3xl font-extrabold tabular-nums tracking-tight text-ink">{item.value}</Text>
         <Text className="mb-1 text-xs text-muted">{item.detail}</Text>
       </div>
     </article>
@@ -379,7 +430,7 @@ function WorkoutCheckIn({ rihab }: { rihab: Rihab }) {
   };
 
   return (
-    <article className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
+    <article className="rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card p-5 sm:p-6">
       <div className="flex flex-col gap-6 lg:flex-row lg:items-center">
         <div className="flex items-center gap-4 lg:w-72 lg:shrink-0">
           <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-violet-soft text-violet">
@@ -472,7 +523,7 @@ function LiveSession({ rihab }: { rihab: Rihab }) {
   const button = "flex items-center gap-2 rounded-xl px-3.5 py-2 text-sm font-semibold transition";
 
   return (
-    <article className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
+    <article className="rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card p-5 sm:p-6">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
         <div>
           <Text as="h2" className="font-display text-lg font-bold text-ink">Live session</Text>
@@ -486,7 +537,7 @@ function LiveSession({ rihab }: { rihab: Rihab }) {
         </div>
         <div className="flex items-center gap-2">
           {uncalibrated && <span className="rounded-full bg-orange-soft px-2.5 py-1 text-xs font-bold text-orange">Not calibrated</span>}
-          <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${s?.tracking ? "bg-success-soft text-success" : "bg-canvas text-muted"}`}>
+          <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${s?.tracking ? "bg-success-soft text-success glow-live" : "bg-canvas text-muted"}`}>
             {s?.tracking ? "Tracking" : "Paused"}
           </span>
         </div>
@@ -494,8 +545,8 @@ function LiveSession({ rihab }: { rihab: Rihab }) {
 
       <div className="mb-5 flex flex-col gap-5 sm:flex-row sm:items-center">
         <div className="sm:w-40 sm:shrink-0">
-          <Text className="font-display text-5xl font-bold tabular-nums tracking-tight text-ink">{fmt(rihab.angle, 0, "°")}</Text>
-          <Text className="mt-1 text-xs font-semibold uppercase tracking-wide text-muted">{s ? KNEE_LABEL[s.knee] : "Knee angle"}</Text>
+          <Text className="font-mono text-5xl font-extrabold tabular-nums tracking-tighter text-ink">{fmt(rihab.angle, 0, "°")}</Text>
+          <Text className="mt-1 text-xs font-semibold uppercase tracking-wider text-muted/80">{s ? KNEE_LABEL[s.knee] : "Knee angle"}</Text>
           <div className="mt-3 flex gap-3 text-xs text-muted">
             <span><b className="text-ink">{count("healthy")}</b> healthy</span>
             <span><b className="text-ink">{count("injured")}</b> injured</span>
@@ -513,14 +564,14 @@ function LiveSession({ rihab }: { rihab: Rihab }) {
               key={knee}
               disabled={!rihab.connected}
               onClick={() => rihab.setKnee(knee)}
-              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${s?.knee === knee ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"}`}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${s?.knee === knee ? "bg-surface text-ink shadow-selected" : "text-muted hover:text-ink"}`}
             >
               {KNEE_LABEL[knee]}
             </Action>
           ))}
         </div>
         {s?.tracking ? (
-          <Action className={`${button} bg-ink text-white`} onClick={rihab.stop} disabled={!rihab.connected}>
+          <Action className={`${button} bg-night text-white`} onClick={rihab.stop} disabled={!rihab.connected}>
             <Icon name="stop" size="sm" /> Stop
           </Action>
         ) : (
@@ -565,7 +616,7 @@ function RecoveryScore({ rihab }: { rihab: Rihab }) {
   const previous = rihab.progress.filter((p) => p.id !== c?.workout_id).at(-1);
 
   return (
-    <article className="relative overflow-hidden rounded-2xl bg-brand p-6 text-white shadow-brand">
+    <article className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-brand to-brand-dark p-6 text-white shadow-brand">
       <div className="absolute -right-10 -top-10 size-40 rounded-full border border-white/10" />
       <div className="absolute -right-2 -top-2 size-24 rounded-full border border-white/10" />
       <div className="relative">
@@ -579,7 +630,7 @@ function RecoveryScore({ rihab }: { rihab: Rihab }) {
         {c ? (
           <>
             <div className="mt-1 flex items-baseline gap-2">
-              <Text className="font-display text-5xl font-bold">{c.score.toFixed(0)}</Text>
+              <Text className="font-mono text-5xl font-extrabold tabular-nums">{c.score.toFixed(0)}</Text>
               <Text className="text-sm text-white/60">/ 100</Text>
               {previous?.score != null && (
                 <Text className="ml-auto text-xs font-semibold text-mint">{signed(c.score - previous.score, " pts")} vs last</Text>
@@ -665,7 +716,7 @@ function ActivityChart({ history }: { history: Workout[] }) {
   const latestPoint = points.at(-1)!;
 
   return (
-    <article className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
+    <article className="rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card p-5 sm:p-6">
       <div className="mb-7 flex flex-wrap items-start justify-between gap-4">
         <div>
           <Text as="h2" className="font-display text-lg font-bold text-ink">Successful reps</Text>
@@ -677,7 +728,7 @@ function ActivityChart({ history }: { history: Workout[] }) {
               key={item}
               onClick={() => setPeriod(item)}
               className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${
-                period === item ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
+                period === item ? "bg-surface text-ink shadow-selected" : "text-muted hover:text-ink"
               }`}
             >
               {item}
@@ -749,7 +800,7 @@ function StreakSection({ history }: { history: Workout[] }) {
   const weekDone = week.filter((d) => days.has(d.getTime())).length;
 
   return (
-    <article className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
+    <article className="rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card p-5 sm:p-6">
       <div className="mb-5 flex items-center justify-between">
         <div>
           <Text as="h2" className="font-display text-lg font-bold text-ink">Exercise streak</Text>
@@ -802,7 +853,7 @@ function DeviceLog({ rihab }: { rihab: Rihab }) {
   const tone = { info: "text-muted", warn: "text-orange", error: "text-rose" };
 
   return (
-    <article className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
+    <article className="rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card p-5 sm:p-6">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <Text as="h2" className="font-display text-lg font-bold text-ink">Device log</Text>
@@ -842,7 +893,7 @@ function PageIntro({ title, children }: { title: string; children: ReactNode }) 
 
 function Card({ title, subtitle, children, className = "" }: { title: string; subtitle?: string; children: ReactNode; className?: string }) {
   return (
-    <article className={`rounded-2xl border border-line bg-surface p-5 sm:p-6 ${className}`}>
+    <article className={`rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card p-5 sm:p-6 ${className}`}>
       <div className="mb-5">
         <Text as="h2" className="font-display text-lg font-bold text-ink">{title}</Text>
         {subtitle && <Text className="mt-1 text-sm text-muted">{subtitle}</Text>}
@@ -864,7 +915,7 @@ function OverviewView({ rihab }: { rihab: Rihab }) {
           <Text as="p" className="mt-2 text-sm text-muted sm:text-base">Your body is ready for a strong day. Here&apos;s your progress.</Text>
         </div>
         <div className="flex items-center gap-2 self-start rounded-xl border border-line bg-surface px-3 py-2 text-xs font-semibold text-muted sm:self-auto">
-          <span className={`size-2 rounded-full ${link.ok ? "bg-success shadow-status" : "bg-rose"}`} />
+          <span className={`size-2 rounded-full ${link.ok ? "bg-success glow-live" : "bg-rose"}`} />
           {link.ok ? `Brace connected · ${link.detail}` : `${link.label} · ${link.detail}`}
         </div>
       </div>
@@ -969,8 +1020,236 @@ function suggestedFocus(rihab: Rihab): Exercise["focus"] | null {
   return "Strength";
 }
 
+// ---------------------------------------------------------------- exercise demos
+
+type Pt = { x: number; y: number };
+
+/** One frame of the stick figure, side view, facing right. The braced leg is the one drawn in front. */
+type Pose = {
+  head: Pt;
+  shoulder: Pt;
+  elbow: Pt;
+  hand: Pt;
+  hip: Pt;
+  knee: Pt;
+  ankle: Pt;
+  toe: Pt;
+  other: [knee: Pt, ankle: Pt, toe: Pt];
+  /** 0-1: how hard the braced thigh is working, drawn as a glow. */
+  effort?: number;
+};
+
+type Demo = {
+  /** `s` runs 0 → 1 → 0 once per rep. */
+  pose: (s: number) => Pose;
+  seconds: number;
+  /** Fraction of each rep spent holding at the top. */
+  hold: number;
+  /** Furniture outline, as an SVG path. */
+  prop?: string;
+};
+
+const BONE = { torso: 34, neck: 10, thigh: 26, shin: 26, upperArm: 17, forearm: 16, foot: 8 };
+
+const mix = (a: number, b: number, s: number) => a + (b - a) * s;
+const toward = (p: Pt, deg: number, len: number): Pt => ({
+  x: p.x + len * Math.cos((deg * Math.PI) / 180),
+  y: p.y + len * Math.sin((deg * Math.PI) / 180),
+});
+
+/** Two-bone limb from `root` reaching for `target` (clamped to the limb's length); `side` picks which way the middle joint bends. */
+function limb(root: Pt, target: Pt, l1: number, l2: number, side: 1 | -1): [mid: Pt, end: Pt] {
+  const angle = Math.atan2(target.y - root.y, target.x - root.x);
+  const d = Math.max(Math.min(Math.hypot(target.x - root.x, target.y - root.y), l1 + l2 - 0.01), Math.abs(l1 - l2) + 0.01);
+  const bend = Math.acos((l1 * l1 + d * d - l2 * l2) / (2 * l1 * d));
+  const mid = { x: root.x + l1 * Math.cos(angle + side * bend), y: root.y + l1 * Math.sin(angle + side * bend) };
+  return [mid, { x: root.x + d * Math.cos(angle), y: root.y + d * Math.sin(angle) }];
+}
+
+/** Lying on the back, head to the left, arms along the body. */
+function lyingTop(hip: Pt) {
+  const shoulder = toward(hip, 180, BONE.torso);
+  const elbow = toward(shoulder, 4, BONE.upperArm);
+  return { shoulder, head: toward(shoulder, 180, BONE.neck), elbow, hand: toward(elbow, 0, BONE.forearm) };
+}
+
+/** Lying on the back with the knee bent and the foot flat, as the resting leg in several exercises. */
+function bentLeg(hip: Pt): Pose["other"] {
+  const [knee, ankle] = limb(hip, { x: hip.x + 28, y: 105 }, BONE.thigh, BONE.shin, -1);
+  return [knee, ankle, { x: ankle.x + BONE.foot, y: 106 }];
+}
+
+function straightLeg(hip: Pt, deg: number): Pose["other"] {
+  const knee = toward(hip, deg, BONE.thigh);
+  const ankle = toward(knee, deg, BONE.shin);
+  return [knee, ankle, toward(ankle, deg - 90, BONE.foot)];
+}
+
+const DEMOS: Record<string, Demo> = {
+  "Heel slides": {
+    seconds: 3.2,
+    hold: 0.1,
+    pose: (s) => {
+      const hip = { x: 95, y: 103 };
+      const [knee, ankle] = limb(hip, { x: mix(147, 121, s), y: 105 }, BONE.thigh, BONE.shin, -1);
+      return { ...lyingTop(hip), hip, knee, ankle, toe: toward(ankle, mix(-90, -5, s), BONE.foot), other: straightLeg({ x: 95, y: 104 }, 0) };
+    },
+  },
+  "Seated knee bends": {
+    seconds: 4.5,
+    hold: 0.35,
+    prop: "M68 44V110M64 80H100M96 80V110",
+    pose: (s) => {
+      const hip = { x: 80, y: 76 };
+      const shoulder = toward(hip, -95, BONE.torso);
+      const elbow = toward(shoulder, 75, BONE.upperArm);
+      const knee = { x: 106, y: 76 };
+      const ankle = toward(knee, mix(80, 128, s), BONE.shin);
+      const otherAnkle = toward({ x: 104, y: 76 }, 84, BONE.shin);
+      return {
+        head: toward(shoulder, -95, BONE.neck),
+        shoulder,
+        elbow,
+        hand: toward(elbow, 45, BONE.forearm),
+        hip,
+        knee,
+        ankle,
+        toe: { x: ankle.x + BONE.foot, y: Math.min(ankle.y + 5, 109) },
+        other: [{ x: 104, y: 76 }, otherAnkle, { x: otherAnkle.x + BONE.foot, y: 109 }],
+      };
+    },
+  },
+  "Quad sets": {
+    seconds: 4,
+    hold: 0.4,
+    pose: (s) => {
+      const hip = { x: 95, y: 103 };
+      const knee = { x: 121, y: 103 + 1.5 * s };
+      const ankle = { x: 147, y: 104 - 2.5 * s };
+      return { ...lyingTop(hip), hip, knee, ankle, toe: toward(ankle, -90, BONE.foot), other: bentLeg(hip), effort: s };
+    },
+  },
+  "Straight leg raises": {
+    seconds: 3.6,
+    hold: 0.1,
+    pose: (s) => {
+      const hip = { x: 95, y: 103 };
+      const [knee, ankle, toe] = straightLeg(hip, -38 * s);
+      return { ...lyingTop(hip), hip, knee, ankle, toe, other: bentLeg(hip), effort: s };
+    },
+  },
+  "Mini squats": {
+    seconds: 3,
+    hold: 0.05,
+    prop: "M128 110V52H182",
+    pose: (s) => {
+      const hip = { x: 111 - 8 * s, y: 53 + 15 * s };
+      const lean = -90 + 18 * s;
+      const shoulder = toward(hip, lean, BONE.torso);
+      const [elbow, hand] = limb(shoulder, { x: 129, y: 53 }, BONE.upperArm, BONE.forearm, 1);
+      const [knee, ankle] = limb(hip, { x: 112, y: 104 }, BONE.thigh, BONE.shin, -1);
+      const [otherKnee, otherAnkle] = limb(hip, { x: 108, y: 104 }, BONE.thigh, BONE.shin, -1);
+      return {
+        head: toward(shoulder, lean, BONE.neck),
+        shoulder,
+        elbow,
+        hand,
+        hip,
+        knee,
+        ankle,
+        toe: { x: ankle.x + BONE.foot, y: 108 },
+        other: [otherKnee, otherAnkle, { x: otherAnkle.x + BONE.foot, y: 108 }],
+        effort: s,
+      };
+    },
+  },
+  "Hamstring stretch": {
+    seconds: 6,
+    hold: 0.5,
+    pose: (s) => {
+      const hip = { x: 72, y: 104 };
+      const lean = mix(-95, -48, s);
+      const shoulder = toward(hip, lean, BONE.torso);
+      const [elbow, hand] = limb(shoulder, { x: mix(94, 116, s), y: mix(96, 100, s) }, BONE.upperArm, BONE.forearm, -1);
+      const [knee, ankle, toe] = straightLeg(hip, 0);
+      return { head: toward(shoulder, lean, BONE.neck), shoulder, elbow, hand, hip, knee, ankle, toe, other: straightLeg({ x: 72, y: 102.5 }, 0), effort: s };
+    },
+  },
+};
+
+/** 0 → 1 → 0 over one rep, eased, holding at 1 for `hold` and resting at 0 at the end. */
+function repPhase(t: number, hold: number, rest = 0.15) {
+  const move = (1 - hold - rest) / 2;
+  const ease = (x: number) => (1 - Math.cos(Math.PI * x)) / 2;
+  if (t < move) return ease(t / move);
+  if (t < move + hold) return 1;
+  if (t < 2 * move + hold) return ease(1 - (t - move - hold) / move);
+  return 0;
+}
+
+/** How far the knee is bent, as the brace would read it: 0° is straight. */
+function kneeBend({ hip, knee, ankle }: Pose) {
+  const a = Math.atan2(hip.y - knee.y, hip.x - knee.x);
+  const b = Math.atan2(ankle.y - knee.y, ankle.x - knee.x);
+  const inside = Math.abs(((((a - b) * 180) / Math.PI + 540) % 360) - 180);
+  return 180 - inside;
+}
+
+const line = (...pts: Pt[]) => pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+function ExerciseDemo({ name, demo }: { name: string; demo: Demo }) {
+  const [s, setS] = useState(0);
+
+  useEffect(() => {
+    // With reduced motion, hold the figure still at the top of the rep instead of animating.
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setS(1);
+      return;
+    }
+    const start = performance.now();
+    let frame = requestAnimationFrame(function tick(now) {
+      setS(repPhase((((now - start) / 1000) % demo.seconds) / demo.seconds, demo.hold));
+      frame = requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [demo]);
+
+  const p = demo.pose(s);
+  const thighDeg = (Math.atan2(p.knee.y - p.hip.y, p.knee.x - p.hip.x) * 180) / Math.PI;
+  const stroke = { fill: "none", strokeLinecap: "round", strokeLinejoin: "round" } as const;
+
+  return (
+    <div className="mt-4 rounded-xl bg-canvas p-3">
+      <svg viewBox="0 0 200 116" className="h-auto w-full" role="img" aria-label={`Stick figure doing ${name.toLowerCase()} with the brace on the knee`}>
+        <line x1="8" y1="110" x2="192" y2="110" stroke="var(--color-line)" strokeWidth="2" strokeLinecap="round" />
+        {demo.prop && <path d={demo.prop} {...stroke} stroke="var(--color-muted)" strokeOpacity="0.5" strokeWidth="2.5" />}
+
+        <polyline points={line(p.hip, ...p.other)} {...stroke} stroke="var(--color-muted)" strokeOpacity="0.6" strokeWidth="4" />
+        {!!p.effort && <line x1={p.hip.x} y1={p.hip.y} x2={p.knee.x} y2={p.knee.y} stroke="var(--color-brand)" strokeOpacity={p.effort * 0.35} strokeWidth="11" strokeLinecap="round" />}
+        <line x1={p.hip.x} y1={p.hip.y} x2={p.shoulder.x} y2={p.shoulder.y} {...stroke} stroke="var(--color-ink)" strokeWidth="4.5" />
+        <polyline points={line(p.shoulder, p.elbow, p.hand)} {...stroke} stroke="var(--color-ink)" strokeWidth="3.5" />
+        <circle cx={p.head.x} cy={p.head.y} r="6.5" fill="var(--color-surface)" stroke="var(--color-ink)" strokeWidth="3.5" />
+        <polyline points={line(p.hip, p.knee, p.ankle, p.toe)} {...stroke} stroke="var(--color-ink)" strokeWidth="4" />
+
+        {/* The brace: a sensor pod strapped across the knee with a blinking status light. */}
+        <g transform={`translate(${p.knee.x} ${p.knee.y}) rotate(${thighDeg})`}>
+          <rect x="-5.5" y="-4" width="11" height="8" rx="2.5" fill="var(--color-brand)" stroke="var(--color-surface)" strokeWidth="1.2" />
+          <circle cx="2.2" cy="0" r="1.4" fill="var(--color-mint)" className="animate-pulse" />
+        </g>
+      </svg>
+      <div className="mt-1 flex items-center justify-between px-1 text-xs font-semibold text-muted">
+        <span className="flex items-center gap-1.5">
+          <span className="size-1.5 rounded-full bg-brand" /> Brace reading
+        </span>
+        <span className="font-mono text-ink tabular-nums">knee bend {kneeBend(p).toFixed(0)}°</span>
+      </div>
+    </div>
+  );
+}
+
 function CoachView({ rihab }: { rihab: Rihab }) {
   const focus = suggestedFocus(rihab);
+  const [demo, setDemo] = useState<string | null>(null);
   const tone: Record<Exercise["focus"], string> = {
     "Range of motion": "bg-brand-soft text-brand",
     Strength: "bg-orange-soft text-orange",
@@ -987,7 +1266,7 @@ function CoachView({ rihab }: { rihab: Rihab }) {
 
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-label="Exercises">
         {EXERCISES.map((e) => (
-          <article key={e.name} className={`rounded-2xl border bg-surface p-5 ${e.focus === focus ? "border-brand" : "border-line"}`}>
+          <article key={e.name} className={`flex flex-col rounded-2xl border bg-surface p-5 transition-shadow hover:shadow-card ${e.focus === focus ? "border-brand shadow-selected" : "border-edge shadow-soft"}`}>
             <div className="mb-3 flex items-center justify-between gap-2">
               <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${tone[e.focus]}`}>{e.focus}</span>
               {e.focus === focus && <span className="text-xs font-bold text-brand">Suggested today</span>}
@@ -995,6 +1274,18 @@ function CoachView({ rihab }: { rihab: Rihab }) {
             <Text as="h2" className="font-display text-lg font-bold text-ink">{e.name}</Text>
             <Text className="mt-1 text-sm font-semibold text-muted">{e.dose}</Text>
             <Text as="p" className="mt-3 text-sm leading-6 text-ink">{e.how}</Text>
+            {DEMOS[e.name] && (
+              <div className="mt-auto pt-4">
+                <Action
+                  onClick={() => setDemo(demo === e.name ? null : e.name)}
+                  className="flex items-center gap-2 rounded-xl border border-line px-3.5 py-2 text-sm font-semibold text-ink transition hover:bg-canvas"
+                >
+                  <Icon name={demo === e.name ? "stop" : "play"} size="sm" />
+                  {demo === e.name ? "Hide demo" : "Show demo"}
+                </Action>
+                {demo === e.name && <ExerciseDemo name={e.name} demo={DEMOS[e.name]} />}
+              </div>
+            )}
           </article>
         ))}
       </section>
@@ -1090,7 +1381,7 @@ function ProfessionalsView({ rihab }: { rihab: Rihab }) {
             onClick={() => choose(p)}
             current={selected?.label === p.label}
             className={`group flex items-center gap-4 rounded-2xl border bg-surface p-5 text-left transition hover:-translate-y-0.5 hover:shadow-card ${
-              selected?.label === p.label ? "border-brand" : "border-line"
+              selected?.label === p.label ? "border-brand shadow-selected" : "border-edge shadow-soft"
             }`}
           >
             <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand">
@@ -1107,7 +1398,7 @@ function ProfessionalsView({ rihab }: { rihab: Rihab }) {
 
       {selected ? (
         <section className="mt-5" aria-label="Map">
-          <article className="overflow-hidden rounded-2xl border border-line bg-surface">
+          <article className="overflow-hidden rounded-2xl border border-edge bg-surface shadow-soft transition-shadow hover:shadow-card">
             <div className="flex flex-wrap items-center justify-between gap-3 p-5 sm:px-6">
               <div>
                 <Text as="h2" className="font-display text-lg font-bold text-ink">{selected.label} near you</Text>
@@ -1264,6 +1555,7 @@ function SettingsView({ rihab }: { rihab: Rihab }) {
 export default function App() {
   const rihab = useRihab();
   const [view, go] = useView();
+  const [theme, toggleTheme] = useTheme();
   const patient = rihab.state?.patient;
   const injury = rihab.workout?.injury ?? rihab.history.find((w) => w.injury)?.injury;
 
@@ -1273,7 +1565,7 @@ export default function App() {
       <div className="min-w-0 flex-1">
         <header className="sticky top-0 z-20 flex h-20 items-center justify-between border-b border-line bg-canvas/90 px-5 backdrop-blur-xl sm:px-8 lg:px-10">
           <div className="flex items-center gap-3 lg:hidden">
-            <div className="flex size-9 items-center justify-center rounded-xl bg-ink text-white">
+            <div className="flex size-9 items-center justify-center rounded-xl bg-night text-white">
               <RiHabMark />
             </div>
             <Text className="font-display font-bold">RiHab</Text>
@@ -1285,6 +1577,13 @@ export default function App() {
             <Text className="mt-1 font-display text-lg font-bold text-ink">{VIEW_TITLES[view]}</Text>
           </div>
           <div className="ml-auto flex items-center gap-3">
+            <Action
+              onClick={toggleTheme}
+              className="flex size-10 items-center justify-center rounded-xl border border-line bg-surface text-muted transition hover:text-ink"
+              label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              <Icon name={theme === "dark" ? "sun" : "moon"} />
+            </Action>
             <Action onClick={() => go("devices")} className="relative flex size-10 items-center justify-center rounded-xl border border-line bg-surface text-muted transition hover:text-ink" label="Notifications">
               <Icon name="bell" />
               {rihab.logs.some((l) => l.level !== "info") && <span className="absolute right-2.5 top-2.5 size-1.5 rounded-full bg-rose ring-2 ring-surface" />}
