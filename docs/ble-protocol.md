@@ -4,6 +4,9 @@ This file is the **contract** between the firmware team (C) and the app team (Ty
 If you change anything here, bump `PROTOCOL_VERSION` and update **both** `firmware/src/packet.h`
 and `app/src/lib/protocol.ts` in the same commit.
 
+> **Status:** not implemented yet. The Arduino Uno has no Bluetooth, so the working prototype uses the USB text
+> protocol in `serial-protocol.md`, read by `backend/rihab_server.py`. `app/src/lib/protocol.ts` doesn't exist yet.
+
 ---
 
 ## 1. Device

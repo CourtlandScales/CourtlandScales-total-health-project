@@ -1,5 +1,6 @@
 // packet.h — firmware side of docs/ble-protocol.md (v1)
-// Must match app/src/lib/protocol.ts exactly.
+// The app side of BLE (app/src/lib/protocol.ts) isn't built yet; the Uno prototype uses USB serial instead
+// (docs/serial-protocol.md, read by backend/rihab_server.py).
 #pragma once
 #include <stdint.h>
 #include <string.h>

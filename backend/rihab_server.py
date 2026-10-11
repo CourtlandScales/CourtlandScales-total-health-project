@@ -15,6 +15,7 @@ import math
 import random
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, Callable, Literal, Optional
@@ -28,6 +29,7 @@ import db
 
 BAUD = 115200
 SAMPLE_BROADCAST_HZ = 30
+LOG_HISTORY = 50  # recent log lines sent to each new browser, so boot messages like '# ERROR: no accelerometer' aren't missed
 KNEE_CODES = {"H": "healthy", "I": "injured"}
 KNEE_TO_CODE = {v: k for k, v in KNEE_CODES.items()}
 
@@ -280,6 +282,7 @@ class Session:
         self._last_sample_sent = 0.0
         self._last_t = 0.0              # device time of the last sample, to notice Arduino resets
         self._bad_lines = 0
+        self.logs: deque[dict] = deque(maxlen=LOG_HISTORY)
 
     # ---- outgoing
 
@@ -298,10 +301,13 @@ class Session:
             "workout": db.get_workout(self.workout["id"]) if self.workout else None,
             "comparison": self.comparison,
             "progress": db.progress(self.patient),
+            "logs": list(self.logs),
         }
 
     async def log(self, text: str, level: str = "info") -> None:
-        await self.hub.broadcast({"type": "log", "level": level, "text": text, "at": db.iso(db.now_utc())})
+        entry = {"type": "log", "level": level, "text": text, "at": db.iso(db.now_utc())}
+        self.logs.append(entry)
+        await self.hub.broadcast(entry)
 
     async def send_state(self) -> None:
         await self.hub.broadcast(self.state())

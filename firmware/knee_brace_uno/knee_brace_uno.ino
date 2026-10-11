@@ -3,7 +3,8 @@
 // What it does:
 //   1. Reads the accelerometer 25x per second and turns it into a knee angle.
 //   2. Shows the live angle, max bend and rep count on the Grove LCD (backlight color = how bent).
-//   3. Sends every reading over USB as one text line, so the web app can save it to Supabase.
+//   3. Sends every reading over USB as one text line to backend/rihab_server.py, which detects reps,
+//      saves them to the database and streams them to the dashboard in app/.
 //
 // Wiring (Grove Base Shield on the Uno):
 //   - Grove LCD RGB Backlight      -> any I2C port

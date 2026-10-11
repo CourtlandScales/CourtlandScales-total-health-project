@@ -120,7 +120,7 @@ export interface LogEntry {
 }
 
 type ServerMessage =
-  | { type: "snapshot"; state: ServerState; workout: Workout | null; comparison: Comparison | null; progress: ProgressRow[] }
+  | { type: "snapshot"; state: ServerState; workout: Workout | null; comparison: Comparison | null; progress: ProgressRow[]; logs?: LogEntry[] }
   | ({ type: "state" } & ServerState)
   | ({ type: "sample" } & Sample)
   | ({ type: "rep" } & Measurement)
@@ -204,6 +204,7 @@ export function useRihab({ url = WS_URL } = {}) {
             setReps(msg.workout?.measurements ?? []);
             setComparison(msg.comparison);
             setProgress(msg.progress);
+            setLogs(msg.logs ?? []); // includes anything logged before we connected (older servers don't send it)
             refreshHistory();
             break;
           case "state":

@@ -114,7 +114,7 @@ Score = 50% range + 25% speed + 25% smoothness, each capped at 100. Status: 90+ 
 The dashboard uses `app/src/lib/rihab.ts` (typed `useRihab()` hook + REST helpers).
 
 **WebSocket** `ws://localhost:8000/ws`
-- Server → app: `snapshot` (on connect and each new workout), `state`, `sample` (≤30/s; `emg`, `temp`, `battery`, `flags` are null when the source doesn't report them), `rep`, `comparison`, `log`
+- Server → app: `snapshot` (on connect and each new workout; includes the last 50 `logs`), `state`, `sample` (≤30/s; `emg`, `temp`, `battery`, `flags` are null when the source doesn't report them), `rep`, `comparison`, `log`
 - App → server: `start_workout {patient, injury?, performed_at?}`, `end_workout`, `set_knee {knee}`, `start`, `stop`, `calibrate`, `vision {angle}`
 
 **REST** `http://localhost:8000/api`
