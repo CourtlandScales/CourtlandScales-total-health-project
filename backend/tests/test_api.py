@@ -148,3 +148,15 @@ def test_post_workout_checkin(fresh_db):
         assert client.post(f"/api/workouts/{w['id']}/checkin", json={"score": 11}).status_code == 422
         assert client.post(f"/api/workouts/{w['id']}/checkin", json={"score": 0}).status_code == 422
         assert client.post("/api/workouts/999/checkin", json={"score": 5}).status_code == 404
+
+
+def test_firmware_log_before_browser_connects_is_in_snapshot(fresh_db):
+    """The Uno prints its boot/error lines right after the port opens, before anyone has the dashboard open."""
+    source = SimSource(speed=0.001, seed=6)
+    app = create_app(source, database_url=fresh_db)
+    with TestClient(app) as client:
+        source._emit("line", "# ERROR: no accelerometer found on I2C")
+        client.get("/api/state")  # let the server process the line
+        with client.websocket_connect("/ws") as ws:
+            snap = ws.receive_json()
+            assert any("no accelerometer" in entry["text"] for entry in snap["logs"])

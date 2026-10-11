@@ -26,7 +26,7 @@ D,<seq>,<ms>,<angle_x10>,<emg_x10>,<temp_x100>,<battery>,<flags>
 | `battery` | percent (always 100 on USB) | `100` |
 | `flags` | same bits as BLE: 1 = angle calibrated, 2 = EMG calibrated, 4 = EMG poor contact, 8 = battery low | `1` |
 
-Lines starting with `#` are log messages (e.g. `# accelerometer: LIS3DHTR`). The app logs them to the browser console and ignores them otherwise.
+Lines starting with `#` are log messages (e.g. `# accelerometer: LIS3DHTR`). The server (`backend/rihab_server.py`) shows them in the dashboard's Device log, including ones printed before the dashboard was opened.
 
 ## PC → Arduino
 
