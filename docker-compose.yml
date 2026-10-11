@@ -1,6 +1,6 @@
 # docker compose up -d                          Postgres only (what you normally want)
 # docker compose --profile tools up -d          + Adminer table browser on http://localhost:8080
-# docker compose --profile api up -d --build    + the API in a container, simulator only
+# docker compose --profile api up -d --build    + the API in a container (Linux only: needs the Arduino's USB port)
 #
 # Every port is bound to 127.0.0.1, so nothing is reachable from the Wi-Fi.
 
@@ -39,10 +39,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # Linux only: give the container the real Arduino instead of the simulator.
-    # devices:
-    #   - /dev/ttyACM0:/dev/ttyACM0
-    # command: ["python", "rihab_server.py", "--port", "/dev/ttyACM0", "--host", "0.0.0.0"]
+    # Linux only: Docker Desktop on Mac/Windows can't pass a USB device into a container.
+    devices:
+      - /dev/ttyACM0:/dev/ttyACM0
 
 volumes:
   rihab_pg:

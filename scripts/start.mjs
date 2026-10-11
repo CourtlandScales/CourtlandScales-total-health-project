@@ -1,7 +1,6 @@
 // start.mjs: one command, from the repo root, for the whole app.
 //
-//   npm start                 real Arduino (port auto-detected)
-//   npm run sim               simulated patient, no hardware needed
+//   npm start                 Arduino (port auto-detected)
 //   npm start -- --port COM5  any rihab_server.py option after the --
 //
 // First run sets things up: creates backend/.venv and installs requirements.txt (again whenever it changes),

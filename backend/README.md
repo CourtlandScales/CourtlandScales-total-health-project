@@ -12,8 +12,7 @@ Sensors -> Arduino --USB--> FastAPI server (Python, on your laptop) --WebSocket/
 From the **repo root** (not `backend/` or `app/`), with Python 3.10+ and Node 22 installed:
 
 ```
-npm run sim       # simulated patient, no hardware needed
-npm start         # real Arduino, port auto-detected (npm start -- --port COM5 to name it)
+npm start         # Arduino, port auto-detected (npm start -- --port COM5 to name it)
 ```
 
 The first run creates `backend/.venv`, installs the Python and npm packages, then starts the server and the
@@ -36,8 +35,6 @@ The rest of this file is the manual way, plus the details.
    ```
    If PowerShell says "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
    once, or skip activation and call `.venv\Scripts\python.exe` directly.
-3. Optional: 6 weeks of backdated demo history so the progress chart isn't empty:
-   `python seed.py` (patient "Alex"; `--wipe` to redo, `--weeks 8` for more).
 
 No Docker? Nothing to do: if Postgres isn't reachable and `DATABASE_URL` isn't set, the server falls back to
 `backend/rihab.db`. Set `DATABASE_URL` to choose explicitly (it then fails instead of falling back).
@@ -49,7 +46,6 @@ in a second terminal: `cd app`, `npm install`, `npm run dev`, and open http://lo
 The dashboard connects to `http://localhost:8000` by default; set `VITE_RIHAB_SERVER` in `app/.env.local` to change it.
 
 ```
-python rihab_server.py --sim          # simulated patient, no hardware needed
 python rihab_server.py                # real Arduino, port auto-detected
 python rihab_server.py --port COM5    # or name it
 ```
@@ -60,7 +56,10 @@ python rihab_server.py --port COM5    # or name it
 
 Close the Arduino IDE Serial Monitor first; only one program can hold the port. FastAPI isn't in Docker
 by default because Docker Desktop on Windows/Mac can't pass a USB device into a container.
-`docker compose --profile api up -d --build` runs it containerized with the simulator only.
+`docker compose --profile api up -d --build` runs it containerized, on Linux only (it passes `/dev/ttyACM0` in).
+
+Everything on the dashboard comes from the plugged-in brace: there is no simulator or demo data. Tracking
+won't start until the Arduino is connected, and if it stops sending for 3 s the Device log says so.
 
 ## The database (Phase 4)
 
@@ -69,8 +68,9 @@ by default because Docker Desktop on Windows/Mac can't pass a USB device into a 
 | `patients` | patient | name, injury |
 | `workouts` | workout | `performed_at` (backdatable), `recorded_at`, `is_backdated`, rep counts, `angle_pct`, `speed_pct`, `flux_pct`, `score`, `status`, `summary`, `baseline_from`, `feeling` (post-workout check-in, 1–10) |
 | `measurements` | rep | `measured_at`, knee, `rom_deg`, `duration_s`, `flux`, `vision_rom_deg`, `source` (device / python / manual) |
+| `samples` | raw reading while tracking (~30/s) | `offset_s` (seconds since the workout started), knee, `angle`, `ax`/`ay`/`az` (g, null if the accelerometer skipped it) |
 
-Every rep is saved the moment it happens. The healthy knee is measured once; later workouts borrow the most
+Every rep is saved the moment it happens; raw readings are written in batches once a second. The healthy knee is measured once; later workouts borrow the most
 recent earlier healthy baseline (`baseline_from`). Times are stored in UTC and returned as ISO strings with
 a timezone; a time sent without a zone is read as the laptop's local time.
 
@@ -93,7 +93,14 @@ Back up with `docker compose exec db pg_dump -U rihab rihab > rihab_backup.sql`.
 | `I,<text>` | Any message, shown in the app log |
 
 Python sends back `K,H` / `K,I` (which knee), `START` / `STOP`, and `c` (calibrate: leg straight now).
-The Uno sketch only acts on `c`; it ignores the rest and streams continuously, and Python decides which reps count. Until an `R` line arrives, Python finds
+Two sketches speak this protocol:
+- `firmware/src/ArduinoFirmware` (rotary angle sensor on A0, MMA7660 accelerometer, button on D2) prints `S`, `B` and `I`
+  lines and acts on every command. It re-zeroes the angle whenever tracking starts, so start with the leg straight.
+- `firmware/knee_brace_uno` (accelerometer + LCD) prints `D` and `#` lines and only acts on `c`.
+
+Opening the port resets an Uno. The server ignores the half-lines left over from before the reset, and once the
+board is talking again it resends the knee and, if tracking, `START`. If the angle stays near 0° for 15 s of
+tracking, the Device log says so (unplugged sensor, or flip `FLEX_SIGN` in the sketch). Until an `R` line arrives, Python finds
 reps itself from the `S` lines. Flux = RMS deviation of accel magnitude from a 5-sample moving average, in milli-g.
 
 ## What the numbers mean (Phase 3)
@@ -114,11 +121,12 @@ Score = 50% range + 25% speed + 25% smoothness, each capped at 100. Status: 90+ 
 The dashboard uses `app/src/lib/rihab.ts` (typed `useRihab()` hook + REST helpers).
 
 **WebSocket** `ws://localhost:8000/ws`
-- Server → app: `snapshot` (on connect and each new workout; includes the last 50 `logs`), `state`, `sample` (≤30/s; `emg`, `temp`, `battery`, `flags` are null when the source doesn't report them), `rep`, `comparison`, `log`
+- Server → app: `snapshot` (on connect and each new workout; includes the last 50 `logs`), `state`, `sample` (every reading, capped at 40/s; `emg`, `temp`, `battery`, `flags` are null when the source doesn't report them), `rep`, `comparison`, `log`
 - App → server: `start_workout {patient, injury?, performed_at?}`, `end_workout`, `set_knee {knee}`, `start`, `stop`, `calibrate`, `vision {angle}`
 
 **REST** `http://localhost:8000/api`
-- `GET /progress?patient=Alex` (one row per analysed workout, oldest first), `GET /workouts?patient=`, `GET /workouts/{id}`
+- `GET /progress?patient=Alex` (one row per analysed workout, oldest first), `GET /workouts?patient=`, `GET /workouts/{id}` (workouts include `sample_count`)
+- `GET /workouts/{id}/samples?max_points=4000`: the raw angle trace as parallel `offset_s` / `knee` / `angle` lists; longer traces are thinned keeping each stretch's min and max
 - `POST /workouts`, `PATCH /workouts/{id}`, `DELETE /workouts/{id}`
 - `POST /workouts/{id}/checkin {"score": 1-10}`: post-workout check-in (1 = very uncomfortable, 10 = felt great); posting again overwrites it
 - `POST /vision {"angle": 92.5}`, `GET /state`, `GET /patients`, `POST /command`
@@ -126,13 +134,12 @@ The dashboard uses `app/src/lib/rihab.ts` (typed `useRihab()` hook + REST helper
 ## Files
 
 ```
-package.json         (repo root) npm start / npm run sim -> scripts/start.mjs
+package.json         (repo root) npm start -> scripts/start.mjs
 docker-compose.yml   (repo root) Postgres + optional Adminer / API container
 .env.example         (repo root) database login
 backend/
-  rihab_server.py    FastAPI app, serial reader, simulator, WebSocket
+  rihab_server.py    FastAPI app, serial reader, WebSocket
   analysis.py        rep detection + healthy vs injured comparison
   db.py              SQLAlchemy models + every query
-  seed.py            backdated demo history
-  tests/             pytest suite
+  tests/             pytest suite (tests/fakes.py stands in for the Arduino)
 ```

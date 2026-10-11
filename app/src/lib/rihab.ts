@@ -14,9 +14,11 @@ const WS_URL = SERVER.replace(/^http/, "ws") + "/ws";
 const SAMPLE_HISTORY = 30 * 20; // ~20 s of live angle at 30 samples/s
 const LOG_HISTORY = 50;
 // The displayed angle is smoothed, and only changes once it has moved a whole degree. At rest the sensor
-// jitters by about ±0.5° (the simulator models this too), which otherwise makes the number flicker 0 -> 1 -> 2.
+// jitters by about ±0.5°, which otherwise makes the number flicker 0 -> 1 -> 2.
 const ANGLE_SMOOTHING = 0.25;   // 0..1 per sample, lower = steadier but slower (0.25 at 30/s ≈ 0.1 s lag)
 const ANGLE_STEP_DEG = 1;
+const FEED_WINDOW_MS = 2000;   // readings per second are counted over this window
+export const FEED_STALE_MS = 2000; // no reading for this long while the brace is connected = the feed has stopped
 
 /** Next displayed angle: keep the current one unless the smoothed angle has moved at least ANGLE_STEP_DEG. */
 export function steadyAngle(shown: number | null, smoothed: number): number {
@@ -31,8 +33,8 @@ export const FLAG_EMG_POOR = 0x04;
 export const FLAG_BATT_LOW = 0x08;
 
 export interface ServerState {
-  source: "serial" | "sim";
-  connected: boolean;        // is the Arduino (or simulator) attached
+  source: "serial";
+  connected: boolean;        // is the Arduino attached
   port: string | null;
   patient: string;
   workout_id: number | null;
@@ -86,6 +88,7 @@ export interface Workout {
   summary: string | null;
   baseline_from: string | null;
   feeling: number | null;    // post-workout check-in, 1 (very uncomfortable) to 10 (felt great)
+  sample_count: number;      // raw readings stored while tracking
   measurements?: Measurement[];
 }
 
@@ -113,6 +116,21 @@ export type ProgressRow = Pick<
   "id" | "performed_at" | "is_backdated" | "angle_pct" | "speed_pct" | "flux_pct" | "score" | "status" | "injured_reps" | "baseline_from" | "feeling"
 >;
 
+/** A workout's raw angle readings as parallel lists, oldest first (thinned when long; `total` is the stored count). */
+export interface SampleTrace {
+  workout_id: number;
+  total: number;
+  offset_s: number[];        // seconds since the workout started
+  knee: Knee[];
+  angle: number[];
+}
+
+/** How the live data from the brace is arriving. */
+export interface Feed {
+  hz: number;                // readings per second reaching the browser
+  lastAt: number | null;     // Date.now() of the latest reading
+}
+
 export interface LogEntry {
   level: "info" | "warn" | "error";
   text: string;
@@ -138,6 +156,8 @@ export function useRihab({ url = WS_URL } = {}) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [angle, setAngle] = useState<number | null>(null); // live knee angle for display, whole degrees
+  const [feed, setFeed] = useState<Feed>({ hz: 0, lastAt: null });
+  const arrivals = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const sampleBuf = useRef<Sample[]>([]);
   const smoothed = useRef<number | null>(null);
@@ -160,6 +180,14 @@ export function useRihab({ url = WS_URL } = {}) {
     let frame: number;
     let closed = false;
     let delay = 500;
+
+    // Readings per second, recounted twice a second so the rate falls to 0 when the brace goes quiet.
+    const feedTimer = setInterval(() => {
+      const now = Date.now();
+      arrivals.current = arrivals.current.filter((t) => now - t < FEED_WINDOW_MS);
+      const n = arrivals.current.length;
+      setFeed({ hz: Math.round((n * 1000) / FEED_WINDOW_MS), lastAt: n ? arrivals.current[n - 1] : null });
+    }, 500);
 
     // Samples arrive up to 30 times a second; push them to React once per animation frame.
     const flush = () => {
@@ -212,6 +240,7 @@ export function useRihab({ url = WS_URL } = {}) {
             break;
           case "sample":
             sampleBuf.current.push(msg);
+            arrivals.current.push(Date.now());
             break;
           case "rep":
             setReps((r) => [...r, msg]);
@@ -232,6 +261,7 @@ export function useRihab({ url = WS_URL } = {}) {
       clearTimeout(retry);
       clearTimeout(historyTimer.current);
       cancelAnimationFrame(frame);
+      clearInterval(feedTimer);
       ws?.close();
     };
   }, [url, refreshHistory]);
@@ -243,7 +273,7 @@ export function useRihab({ url = WS_URL } = {}) {
   }, []);
 
   return {
-    connected, state, workout, reps, comparison, progress, history, logs, samples, refreshHistory, angle,
+    connected, state, workout, reps, comparison, progress, history, logs, samples, refreshHistory, angle, feed,
     latest: samples[samples.length - 1] ?? null,
     /** performedAt: optional past date-time to backdate, e.g. "2026-09-30T18:00" (local time). */
     startWorkout: (patient: string, { injury, performedAt }: { injury?: string; performedAt?: string } = {}) =>
@@ -277,6 +307,8 @@ export const api = {
   progress: (patient?: string) => request<ProgressRow[]>("/progress" + q(patient)),
   workouts: (patient?: string) => request<Workout[]>("/workouts" + q(patient)),
   workout: (id: number) => request<Workout>(`/workouts/${id}`),
+  /** Raw angle trace recorded while tracking. */
+  samples: (id: number, maxPoints = 4000) => request<SampleTrace>(`/workouts/${id}/samples?max_points=${maxPoints}`),
   patients: () => request<{ id: number; name: string; injury: string | null }[]>("/patients"),
   /** Enter a past workout by hand. */
   createWorkout: (body: { patient: string; performed_at: string; injury?: string; measurements: Partial<Measurement>[] }) =>

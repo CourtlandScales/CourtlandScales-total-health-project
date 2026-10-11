@@ -1,6 +1,7 @@
 """Phase 4: the database. SQLAlchemy models plus every query the server needs.
 
-One row per workout (with its comparison results), one row per rep (with its own timestamp).
+One row per workout (with its comparison results), one row per rep (with its own timestamp), and one row per
+raw reading the brace sent while tracking (samples), so a workout's angle trace can be shown again later.
 All times are stored as UTC and returned as ISO strings with a timezone offset.
 
 Pick the database with DATABASE_URL. Default is the Postgres from docker-compose.yml;
@@ -16,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 
 from sqlalchemy import (
-    DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, create_engine, delete, inspect, select, text,
+    DateTime, Float, ForeignKey, Integer, String, Text, TypeDecorator, create_engine, delete, func, insert, inspect,
+    select, text,
 )
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -94,6 +96,20 @@ class Measurement(Base):
     vision_rom_deg: Mapped[Optional[float]] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(10), default="python")  # device | python | manual
     workout: Mapped[Workout] = relationship(back_populates="measurements")
+
+
+class Sample(Base):
+    """One raw reading from the brace. No ORM relationship: a workout can have 100k of these, so they're
+    queried and deleted in bulk rather than loaded onto the Workout."""
+    __tablename__ = "samples"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workout_id: Mapped[int] = mapped_column(ForeignKey("workouts.id", ondelete="CASCADE"), index=True)
+    offset_s: Mapped[float] = mapped_column(Float)   # seconds since the workout started (survives backdating)
+    knee: Mapped[str] = mapped_column(String(10))
+    angle: Mapped[float] = mapped_column(Float)
+    ax: Mapped[Optional[float]] = mapped_column(Float)  # g; None when the accelerometer skipped this reading
+    ay: Mapped[Optional[float]] = mapped_column(Float)
+    az: Mapped[Optional[float]] = mapped_column(Float)
 
 
 # ---------------------------------------------------------------- engine / sessions
@@ -195,14 +211,14 @@ def measurement_dict(m: Measurement) -> dict:
     }
 
 
-def workout_dict(w: Workout, with_measurements: bool = False) -> dict:
+def workout_dict(w: Workout, with_measurements: bool = False, sample_count: int = 0) -> dict:
     d = {
         "id": w.id, "patient": w.patient.name, "patient_id": w.patient_id, "injury": w.patient.injury,
         "performed_at": iso(w.performed_at), "recorded_at": iso(w.recorded_at), "is_backdated": w.is_backdated,
         "healthy_reps": w.healthy_reps, "injured_reps": w.injured_reps,
         "angle_pct": w.angle_pct, "speed_pct": w.speed_pct, "flux_pct": w.flux_pct,
         "score": w.score, "status": w.status, "summary": w.summary, "baseline_from": iso(w.baseline_from),
-        "feeling": w.feeling,
+        "feeling": w.feeling, "sample_count": sample_count,
     }
     if with_measurements:
         d["measurements"] = [measurement_dict(m) for m in w.measurements]
@@ -268,6 +284,42 @@ def add_measurement(workout_id: int, knee: str, rom_deg: float, duration_s: floa
             w.injured_reps += 1
         s.commit()
         return measurement_dict(m)
+
+
+def add_samples(rows: list[dict]) -> None:
+    """Write a batch of raw readings (dicts with workout_id, offset_s, knee, angle, ax, ay, az)."""
+    with session() as s:
+        s.execute(insert(Sample), rows)
+        s.commit()
+
+
+def _sample_counts(s: Session, workout_ids: list[int]) -> dict[int, int]:
+    if not workout_ids:
+        return {}
+    stmt = select(Sample.workout_id, func.count()).where(Sample.workout_id.in_(workout_ids)).group_by(Sample.workout_id)
+    return dict(s.execute(stmt).all())
+
+
+def get_samples(workout_id: int, max_points: int = 4000) -> Optional[dict]:
+    """A workout's raw readings as parallel lists, oldest first. More than max_points are thinned by keeping
+    the lowest and highest angle of each stretch, in time order, so rep peaks survive."""
+    with session() as s:
+        if s.get(Workout, workout_id) is None:
+            return None
+        rows = s.execute(select(Sample.offset_s, Sample.knee, Sample.angle)
+                         .where(Sample.workout_id == workout_id).order_by(Sample.offset_s, Sample.id)).all()
+    total = len(rows)
+    if total > max_points:
+        size = -(-total // (max_points // 2))  # ceil
+        kept = []
+        for i in range(0, total, size):
+            chunk = rows[i:i + size]
+            lo = min(range(len(chunk)), key=lambda j: chunk[j].angle)
+            hi = max(range(len(chunk)), key=lambda j: chunk[j].angle)
+            kept += [chunk[j] for j in sorted({lo, hi})]
+        rows = kept
+    return {"workout_id": workout_id, "total": total, "offset_s": [r.offset_s for r in rows],
+            "knee": [r.knee for r in rows], "angle": [r.angle for r in rows]}
 
 
 def _reps(measurements: list[Measurement], knee: str) -> list[dict]:
@@ -386,6 +438,7 @@ def delete_workout(workout_id: int) -> bool:
         if w is None:
             return False
         patient_id = w.patient_id
+        s.execute(delete(Sample).where(Sample.workout_id == workout_id))
         s.delete(w)
         s.flush()
         _recompute_patient(s, patient_id)
@@ -393,22 +446,10 @@ def delete_workout(workout_id: int) -> bool:
         return True
 
 
-def delete_patient_workouts(patient: str) -> int:
-    with session() as s:
-        p = s.scalar(select(Patient).where(Patient.name == patient))
-        if p is None:
-            return 0
-        ids = list(s.scalars(select(Workout.id).where(Workout.patient_id == p.id)))
-        s.execute(delete(Measurement).where(Measurement.workout_id.in_(ids)))
-        s.execute(delete(Workout).where(Workout.id.in_(ids)))
-        s.commit()
-        return len(ids)
-
-
 def get_workout(workout_id: int) -> Optional[dict]:
     with session() as s:
         w = s.get(Workout, workout_id)
-        return None if w is None else workout_dict(w, with_measurements=True)
+        return None if w is None else workout_dict(w, True, _sample_counts(s, [w.id]).get(w.id, 0))
 
 
 def _patient_filter(stmt, patient: Optional[str]):
@@ -419,7 +460,9 @@ def list_workouts(patient: Optional[str] = None) -> list[dict]:
     """Newest first."""
     with session() as s:
         stmt = _patient_filter(select(Workout), patient).order_by(Workout.performed_at.desc())
-        return [workout_dict(w) for w in s.scalars(stmt)]
+        workouts = list(s.scalars(stmt))
+        counts = _sample_counts(s, [w.id for w in workouts])
+        return [workout_dict(w, sample_count=counts.get(w.id, 0)) for w in workouts]
 
 
 def progress(patient: Optional[str] = None) -> list[dict]:

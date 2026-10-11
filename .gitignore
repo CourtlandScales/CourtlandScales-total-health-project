@@ -22,3 +22,6 @@ __pycache__/
 .pytest_cache/
 *.db
 rihab_backup.sql
+
+# database backups
+backend/*.bak

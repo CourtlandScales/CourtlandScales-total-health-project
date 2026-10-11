@@ -2,8 +2,8 @@ import math
 
 from fastapi.testclient import TestClient
 
-import rihab_server
-from rihab_server import SimSource, create_app
+from fakes import SimSource
+from rihab_server import create_app
 
 
 def collect(ws, kind, count, limit=20000):
@@ -24,7 +24,7 @@ def test_simulated_workout_end_to_end(fresh_db):
     app = create_app(SimSource(speed=25, seed=1), database_url=fresh_db)
     with TestClient(app) as client, client.websocket_connect("/ws") as ws:
         snap = ws.receive_json()
-        assert snap["type"] == "snapshot" and snap["state"]["source"] == "sim"
+        assert snap["type"] == "snapshot" and snap["state"]["source"] == "serial"
 
         ws.send_json({"type": "start_workout", "patient": "Alex", "injury": "ACL"})
         ws.send_json({"type": "start"})
@@ -41,12 +41,23 @@ def test_simulated_workout_end_to_end(fresh_db):
         assert 60 < c["angle_pct"] < 85
         assert c["speed_pct"] > 10 and c["flux_pct"] > 50
         ws.send_json({"type": "end_workout"})
+        collect(ws, "snapshot", 1)
 
         workout_id = c["workout_id"]
         w = client.get(f"/api/workouts/{workout_id}").json()
         assert w["healthy_reps"] >= 3 and w["injured_reps"] >= 1 and w["score"] is not None
         assert w["measurements"][0]["source"] == "python"
+
+        # Every reading taken while tracking was stored, and each rep's peak is in the trace.
+        trace = client.get(f"/api/workouts/{workout_id}/samples").json()
+        assert trace["total"] == w["sample_count"] > 200 and set(trace["knee"]) == {"healthy", "injured"}
+        assert max(trace["angle"]) > max(m["rom_deg"] for m in w["measurements"]) - 5
+        thin = client.get(f"/api/workouts/{workout_id}/samples", params={"max_points": 100}).json()
+        assert len(thin["angle"]) <= 100 and max(thin["angle"]) == max(trace["angle"])
+        assert client.get("/api/workouts", params={"patient": "Alex"}).json()[0]["sample_count"] == w["sample_count"]
         assert [p["id"] for p in client.get("/api/progress", params={"patient": "Alex"}).json()] == [workout_id]
+        assert client.delete(f"/api/workouts/{workout_id}").status_code == 204
+        assert client.get(f"/api/workouts/{workout_id}/samples").status_code == 404
 
 
 def test_rest_backdating_and_errors(fresh_db):
@@ -160,3 +171,101 @@ def test_firmware_log_before_browser_connects_is_in_snapshot(fresh_db):
         with client.websocket_connect("/ws") as ws:
             snap = ws.receive_json()
             assert any("no accelerometer" in entry["text"] for entry in snap["logs"])
+
+
+def test_rotary_firmware_lines_reboot_sync_and_reps(fresh_db):
+    """What firmware/src/ArduinoFirmware prints: S lines with 6-bit MMA7660 accel (sometimes missing), I lines.
+
+    Opening the port reboots the board, so leftover half-lines are counted quietly and the knee/tracking state
+    is sent again once it is talking.
+    """
+    sent = []
+    source = SimSource(speed=0.001, seed=7)
+    source.send = sent.append
+    app = create_app(source, database_url=fresh_db)
+
+    def bend(start_ms, rom, shake):  # 3 s bend-and-straighten, 1 s rest, ~30 Hz, as the rotary sketch prints it
+        lines = []
+        for i in range(120):
+            a = rom * (1 - math.cos(2 * math.pi * i / 90)) / 2 if i < 90 else 0.0
+            if i % 37 == 5:  # MMA7660 alert bit: angle only
+                lines.append(f"S,{start_ms + i * 33},{a:.1f}")
+                continue
+            th = math.radians(a)
+            q = lambda g: round(g * 21.33) / 21.33  # 6-bit counts
+            wobble = shake * math.sin(i * 2.1)
+            lines.append(f"S,{start_ms + i * 33},{a:.1f},{q(math.sin(th) + wobble):.3f},-0.609,{q(math.cos(th)):.3f}")
+        return lines
+
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        session = app.state.session
+        for line in [".0,0.891,-0.609,-0.141", "537,0.0,0.891", "I,RiHab brace booting", "I,RiHab brace ready"]:
+            source._emit("line", line)
+        collect(ws, "log", 2)
+        assert session._bad_lines == 2  # counted, but not shown in the device log
+
+        ws.send_json({"type": "start"})
+        collect(ws, "state", 1)
+        sent.clear()
+        for line in bend(500, 120, 0.02) + bend(4500, 118, 0.02):  # clock restarted at 500 ms: the board rebooted
+            source._emit("line", line)
+        reps, _ = collect(ws, "rep", 2)
+        assert sent[:2] == ["K,H", "START"]
+        assert all(r["knee"] == "healthy" and 110 < r["rom_deg"] < 125 and r["flux"] for r in reps)
+
+        ws.send_json({"type": "set_knee", "knee": "injured"})
+        while (m := ws.receive_json())["type"] != "state" or m["knee"] != "injured":
+            pass
+        for line in bend(8500, 85, 0.15):
+            source._emit("line", line)
+        c, _ = collect(ws, "comparison", 1)
+        assert 65 < c[0]["angle_pct"] < 78 and c[0]["flux_pct"] > 50
+
+        w = client.get(f"/api/workouts/{session.workout['id']}").json()
+        assert (w["healthy_reps"], w["injured_reps"]) == (2, 1) and w["score"] is not None
+        assert session._bad_lines == 2
+
+
+def test_still_angle_warning(fresh_db):
+    """Tracking with the angle stuck at 0 (sensor unplugged or turning the wrong way) logs one hint."""
+    source = SimSource(speed=0.001, seed=8)
+    app = create_app(source, database_url=fresh_db)
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "start"})
+        collect(ws, "state", 1)
+        for i in range(30 * 20):
+            source._emit("line", f"S,{1000 + i * 33},0.0,0.938,-0.609,-0.188")
+        logs, _ = collect(ws, "log", 1)
+        assert "hasn't moved" in logs[0]["text"]
+        client.get("/api/state")
+        assert sum("hasn't moved" in entry["text"] for entry in app.state.session.logs) == 1
+
+
+def test_start_needs_a_connected_brace(fresh_db):
+    source = SimSource(speed=0.001, seed=9)
+    app = create_app(source, database_url=fresh_db)
+    with TestClient(app) as client:
+        source._emit("status", {"connected": False, "port": None})
+        client.get("/api/state")
+        r = client.post("/api/command", json={"type": "start"})
+        assert r.status_code == 400 and "isn't connected" in r.json()["detail"]
+        assert not client.get("/api/state").json()["tracking"]
+
+
+def test_silent_brace_is_reported(fresh_db, monkeypatch):
+    """Port open but nothing arriving (sketch hung, wrong baud) shows up in the device log, and so does recovery."""
+    import time
+    import rihab_server
+    monkeypatch.setattr(rihab_server, "SILENT_WARN_S", 0.2)
+    source = SimSource(speed=0.001, seed=10)
+    app = create_app(source, database_url=fresh_db)
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        time.sleep(1.5)  # the watchdog checks once a second
+        logs, _ = collect(ws, "log", 1)
+        assert "No data from the brace" in logs[0]["text"]
+        source._emit("line", "S,1000,0.0")
+        logs, _ = collect(ws, "log", 1)
+        assert "sending data again" in logs[0]["text"]

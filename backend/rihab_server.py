@@ -1,7 +1,6 @@
 """RiHab local server: Arduino (USB serial) -> analysis -> database -> React (WebSocket + REST).
 
-    python rihab_server.py --sim              simulated patient, no hardware needed
-    python rihab_server.py                    real Arduino, port auto-detected
+    python rihab_server.py                    Arduino, port auto-detected
     python rihab_server.py --port COM5        or name the port
 
 API docs: http://localhost:8000/docs   WebSocket: ws://localhost:8000/ws
@@ -11,8 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import math
-import random
 import threading
 import time
 from collections import deque
@@ -28,8 +25,14 @@ import analysis
 import db
 
 BAUD = 115200
-SAMPLE_BROADCAST_HZ = 30
+SAMPLE_BROADCAST_HZ = 40  # cap on live samples sent to browsers; the boards send 25-30/s, so normally all get through
+SAMPLE_BURST = 5          # USB hands over several lines at once, so allow short bursts above the cap
 LOG_HISTORY = 50  # recent log lines sent to each new browser, so boot messages like '# ERROR: no accelerometer' aren't missed
+CONNECT_QUIET_S = 2.5   # opening the port resets an Uno; half-lines from before the reset aren't worth a warning
+STILL_WARN_S = 15.0     # tracking this long with the angle stuck near 0 = probably a sensor problem
+STILL_DEG = 3.0
+SILENT_WARN_S = 3.0     # port open but no line for this long = sketch hung, wrong baud, or wrong sketch
+SAMPLE_FLUSH_S = 1.0    # raw readings are written to the database in batches this often
 KNEE_CODES = {"H": "healthy", "I": "injured"}
 KNEE_TO_CODE = {v: k for k, v in KNEE_CODES.items()}
 
@@ -92,7 +95,7 @@ def parse_line(text: str) -> Optional[dict]:
 
 # ---------------------------------------------------------------- sources
 
-Emit = Callable[[str, Any], None]  # emit("line", text) / emit("status", dict) / emit("log", text)
+Emit = Callable[[str, Any], None]  # emit("line", text) / emit("status", dict) / emit("log", text or (text, level))
 
 
 class SerialSource:
@@ -146,9 +149,10 @@ class SerialSource:
                 continue
             try:
                 with serial.Serial(port, BAUD, timeout=1) as ser:
+                    ser.reset_input_buffer()  # drop whatever the OS buffered before the board reset
                     self._ser, self.connected_port, warned = ser, port, False
                     self._emit("status", {"connected": True, "port": port})
-                    self._emit("log", f"Connected to Arduino on {port}")
+                    self._emit("log", (f"Connected to Arduino on {port}", "info"))
                     while not self._stop.is_set():
                         raw = ser.readline()
                         if raw:
@@ -163,85 +167,6 @@ class SerialSource:
                     self._emit("status", {"connected": False, "port": None})
                 self._ser, self.connected_port = None, None
             self._stop.wait(2)
-
-
-class SimSource:
-    """A pretend Arduino. Produces the same S lines the real one prints, at 30 samples/s of device time.
-
-    speed > 1 runs device time faster than real time (used by the tests).
-    """
-    kind = "sim"
-    RATE_HZ = 30
-    PROFILES = {  # rom degrees, seconds per rep, accelerometer jitter in g
-        "healthy": {"rom": 130.0, "rep_s": 3.0, "jitter": 0.012},
-        "injured": {"rom": 95.0, "rep_s": 3.9, "jitter": 0.032},
-    }
-    REST_S = 1.2
-
-    def __init__(self, speed: float = 1.0, seed: Optional[int] = None) -> None:
-        self.speed = speed
-        self.connected_port = "simulator"
-        self.knee = "healthy"
-        self.tracking = False
-        self._rand = random.Random(seed)
-        self._task: Optional[asyncio.Task] = None
-        self._t = 0.0          # device time, seconds
-        self._rep_t0 = None    # when the current rep began
-        self._rep = None       # this rep's randomized profile
-
-    def start(self, emit: Emit) -> None:
-        self._emit = emit
-        self._task = asyncio.get_running_loop().create_task(self._run())
-        emit("status", {"connected": True, "port": self.connected_port})
-        emit("line", "I,Simulator ready")
-
-    def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-
-    def send(self, cmd: str) -> None:
-        if cmd.startswith("K,"):
-            self.knee = KNEE_CODES.get(cmd[2:].strip().upper(), self.knee)
-        elif cmd == "START":
-            self.tracking = True
-        elif cmd == "STOP":
-            self.tracking = False
-
-    async def _run(self) -> None:
-        dt = 1.0 / self.RATE_HZ
-        carry = 0.0
-        while True:
-            await asyncio.sleep(dt)
-            carry += self.speed
-            while carry >= 1:
-                carry -= 1
-                self._t += dt
-                self._emit("line", self._sample())
-
-    def _sample(self) -> str:
-        angle = self._angle()
-        p = self.PROFILES[self.knee]
-        j = p["jitter"] if self.tracking else 0.004
-        tremor = j * 0.8 * math.sin(2 * math.pi * 7 * self._t) if self.knee == "injured" else 0.0
-        th = math.radians(angle)
-        g = self._rand.gauss
-        ax, ay, az = math.sin(th) + g(0, j) + tremor, g(0, j), math.cos(th) + g(0, j)
-        return f"S,{int(self._t * 1000)},{angle:.1f},{ax:.3f},{ay:.3f},{az:.3f}"
-
-    def _angle(self) -> float:
-        noise = self._rand.gauss(0, 0.4)
-        if not self.tracking:
-            self._rep_t0 = None
-            return max(0.0, 1.0 + noise)
-        if self._rep_t0 is None or self._t - self._rep_t0 > self._rep["rep_s"] + self.REST_S:
-            base = self.PROFILES[self.knee]
-            self._rep_t0 = self._t
-            self._rep = {"rom": base["rom"] * self._rand.uniform(0.96, 1.04),
-                         "rep_s": base["rep_s"] * self._rand.uniform(0.95, 1.05)}
-        phase = (self._t - self._rep_t0) / self._rep["rep_s"]
-        if phase >= 1:
-            return max(0.0, 1.0 + noise)
-        return max(0.0, 1.0 + self._rep["rom"] * (1 - math.cos(2 * math.pi * phase)) / 2 + noise)
 
 
 # ---------------------------------------------------------------- live session
@@ -280,8 +205,18 @@ class Session:
         self.vision_angle: Optional[float] = None
         self.vision_peak: Optional[float] = None
         self._last_sample_sent = 0.0
+        self._sample_budget = float(SAMPLE_BURST)
         self._last_t = 0.0              # device time of the last sample, to notice Arduino resets
         self._bad_lines = 0
+        self._quiet_until = 0.0         # time.monotonic() until which bad lines are counted but not logged
+        self._sync_pending = False      # resend knee/tracking to the board once it's talking again
+        self._track_t0: Optional[float] = None  # device time of the first sample since tracking started
+        self._track_peak = 0.0
+        self._still_warned = False
+        self._samples: list[dict] = []  # raw readings waiting to be written
+        self._last_flush = 0.0
+        self.last_line_at: Optional[float] = None  # time.monotonic() of the last line from the brace
+        self._silent_warned = False
         self.logs: deque[dict] = deque(maxlen=LOG_HISTORY)
 
     # ---- outgoing
@@ -317,14 +252,27 @@ class Session:
     async def handle(self, kind: str, payload: Any) -> None:
         if kind == "status":
             self.connected, self.port = payload["connected"], payload["port"]
+            if self.connected:
+                self._quiet_until = time.monotonic() + CONNECT_QUIET_S
+                self._sync_pending = True
+                self.last_line_at, self._silent_warned = time.monotonic(), False
+            else:
+                self.flush_samples()
             await self.send_state()
         elif kind == "log":
-            await self.log(payload, "warn")
+            text, level = payload if isinstance(payload, tuple) else (payload, "warn")
+            await self.log(text, level)
         elif kind == "line":
+            self.last_line_at = time.monotonic()
+            if self._silent_warned:
+                self._silent_warned = False
+                await self.log("The brace is sending data again.")
             try:
                 msg = parse_line(payload)
             except ValueError as e:
                 self._bad_lines += 1
+                if time.monotonic() < self._quiet_until:
+                    return
                 if self._bad_lines <= 5 or self._bad_lines % 100 == 0:
                     await self.log(f"{e} (#{self._bad_lines})", "warn")
                 return
@@ -337,14 +285,23 @@ class Session:
             t = msg["ms"] / 1000.0
             if t < self._last_t:  # the Arduino rebooted (opening the port resets an Uno) and its clock restarted
                 self.detector.reset()
+                self._track_t0 = None
+                self._sync_pending = True
             self._last_t = t
+            if self._sync_pending:
+                self.sync_device()
+            if self.tracking:
+                await self.check_still(t, msg["angle"])
+                self.store_sample(msg)
             if self.tracking and not self.device_reps:
                 rep = self.detector.feed(t, msg["angle"], msg["accel"])
                 if rep:
                     await self.record_rep(self.knee, rep.rom_deg, rep.duration_s, rep.flux, "python")
             now = time.monotonic()
-            if now - self._last_sample_sent >= 1.0 / SAMPLE_BROADCAST_HZ:
-                self._last_sample_sent = now
+            self._sample_budget = min(SAMPLE_BURST, self._sample_budget + (now - self._last_sample_sent) * SAMPLE_BROADCAST_HZ)
+            self._last_sample_sent = now
+            if self._sample_budget >= 1:
+                self._sample_budget -= 1
                 ax, ay, az = msg["accel"] or (None, None, None)
                 await self.hub.broadcast({"type": "sample", "t": t, "angle": msg["angle"], "ax": ax, "ay": ay,
                                           "az": az, "emg": msg.get("emg"), "temp": msg.get("temp"),
@@ -361,6 +318,48 @@ class Session:
         elif kind == "info":
             await self.log(f"Arduino: {msg['text']}")
 
+    def store_sample(self, msg: dict) -> None:
+        """Keep every reading taken while tracking, so a workout's angle trace can be replayed later."""
+        if self.workout is None:
+            return
+        ax, ay, az = msg["accel"] or (None, None, None)
+        self._samples.append({"workout_id": self.workout["id"], "offset_s": round(time.monotonic() - self.workout_started, 3),
+                              "knee": self.knee, "angle": msg["angle"], "ax": ax, "ay": ay, "az": az})
+        if time.monotonic() - self._last_flush >= SAMPLE_FLUSH_S:
+            self.flush_samples()
+
+    def flush_samples(self) -> None:
+        self._last_flush = time.monotonic()
+        if self._samples:
+            rows, self._samples = self._samples, []
+            db.add_samples(rows)
+
+    async def watch(self) -> None:
+        """Runs once a second: tell the app when the brace is plugged in but has stopped sending."""
+        self.flush_samples()
+        if self.connected and not self._silent_warned and self.last_line_at is not None \
+                and time.monotonic() - self.last_line_at > SILENT_WARN_S:
+            self._silent_warned = True
+            await self.log(f"No data from the brace for {SILENT_WARN_S:.0f} s. Is the RiHab sketch uploaded, "
+                           f"at {BAUD} baud? Try unplugging it and plugging it back in.", "warn")
+
+    def sync_device(self) -> None:
+        """The board just (re)booted and forgot everything, including commands sent while it was booting."""
+        self._sync_pending = False
+        self.source.send(f"K,{KNEE_TO_CODE[self.knee]}")
+        if self.tracking:
+            self.source.send("START")
+
+    async def check_still(self, t: float, angle: float) -> None:
+        """Warn once per tracking run if the angle never leaves 0: unplugged sensor, or it turns the wrong way."""
+        if self._track_t0 is None:
+            self._track_t0, self._track_peak = t, angle
+        self._track_peak = max(self._track_peak, angle)
+        if not self._still_warned and self._track_peak < STILL_DEG and t - self._track_t0 > STILL_WARN_S:
+            self._still_warned = True
+            await self.log(f"Knee angle hasn't moved in {STILL_WARN_S:.0f} s of tracking. If you are bending the knee, "
+                           "check the angle sensor's cable, or flip FLEX_SIGN in the firmware.", "warn")
+
     async def record_rep(self, knee: str, rom: float, duration: float, flux: Optional[float], source: str) -> None:
         if self.workout is None:
             await self.start_workout(self.patient)
@@ -375,6 +374,7 @@ class Session:
     # ---- from the app
 
     async def start_workout(self, patient: Optional[str] = None, injury: Optional[str] = None, performed_at=None) -> None:
+        self.flush_samples()
         self.patient = (patient or self.patient).strip() or self.patient
         self.injury = injury
         self.workout = db.start_workout(self.patient, injury, performed_at)
@@ -390,6 +390,7 @@ class Session:
         if self.tracking:
             await self.stop()
         if self.workout:
+            self.flush_samples()
             self.comparison = db.recompute(self.workout["id"])
             await self.log(f"Workout #{self.workout['id']} saved")
         self.workout = None
@@ -405,15 +406,19 @@ class Session:
             await self.send_state()
 
     async def start(self) -> None:
+        if not self.connected:
+            raise ValueError("The brace isn't connected. Plug in the Arduino first.")
         if self.workout is None:
             await self.start_workout(self.patient)
         self.tracking = True
         self.detector.reset()
+        self._track_t0, self._still_warned = None, False
         self.source.send("START")
         await self.send_state()
 
     async def stop(self) -> None:
         self.tracking = False
+        self.flush_samples()
         self.source.send("STOP")
         await self.send_state()
 
@@ -479,7 +484,7 @@ class VisionIn(BaseModel):
 
 
 def create_app(source=None, database_url: Optional[str] = None, default_patient: str = "Alex") -> FastAPI:
-    source = source or SimSource()
+    source = source or SerialSource()
     hub = Hub()
     session = Session(source, hub, default_patient)
 
@@ -500,11 +505,21 @@ def create_app(source=None, database_url: Optional[str] = None, default_patient:
                 except Exception as e:  # one bad message must never stop the stream
                     await session.log(f"Error handling {kind}: {e!r}", "error")
 
-        pump_task = asyncio.create_task(pump())
+        async def watchdog() -> None:
+            while True:
+                await asyncio.sleep(1)
+                try:
+                    await session.watch()
+                except Exception as e:
+                    await session.log(f"Error saving readings: {e!r}", "error")
+
+        pump_task, watch_task = asyncio.create_task(pump()), asyncio.create_task(watchdog())
         source.start(emit)
         yield
         source.stop()
         pump_task.cancel()
+        watch_task.cancel()
+        session.flush_samples()
 
     app = FastAPI(title="RiHab", version="1.0", lifespan=lifespan)
     app.state.session = session
@@ -556,6 +571,17 @@ def create_app(source=None, database_url: Optional[str] = None, default_patient:
             raise HTTPException(404, "workout not found")
         return w
 
+    @app.get("/api/workouts/{workout_id}/samples")
+    def get_samples(workout_id: int, max_points: int = 4000):
+        """The raw angle readings recorded while tracking. Long workouts are thinned to about max_points,
+        keeping each stretch's lowest and highest angle so no rep's peak is lost."""
+        if workout_id == (session.workout or {}).get("id"):
+            session.flush_samples()
+        out = db.get_samples(workout_id, max(100, min(max_points, 50000)))
+        if out is None:
+            raise HTTPException(404, "workout not found")
+        return out
+
     @app.post("/api/workouts", status_code=201)
     async def post_workout(body: WorkoutIn):
         try:
@@ -596,6 +622,7 @@ def create_app(source=None, database_url: Optional[str] = None, default_patient:
             raise HTTPException(404, "workout not found")
         if session.workout and session.workout["id"] == workout_id:
             session.workout, session.comparison, session.tracking = None, None, False
+            session._samples = []
         await hub.broadcast(session.snapshot())
 
     @app.post("/api/vision")
@@ -616,17 +643,15 @@ def create_app(source=None, database_url: Optional[str] = None, default_patient:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="RiHab local server")
-    ap.add_argument("--sim", action="store_true", help="simulated patient instead of a real Arduino")
     ap.add_argument("--port", help="serial port, e.g. COM5 or /dev/ttyACM0 (default: auto-detect)")
     ap.add_argument("--patient", default="Alex", help="patient used when the button starts a workout")
     ap.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 to allow other devices (not recommended)")
     ap.add_argument("--http-port", type=int, default=8000)
-    ap.add_argument("--sim-speed", type=float, default=1.0, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     import uvicorn
-    source = SimSource(speed=args.sim_speed) if args.sim else SerialSource(args.port)
-    print(f"RiHab: {'simulator' if args.sim else 'Arduino on ' + (args.port or 'auto-detected port')}")
+    source = SerialSource(args.port)
+    print(f"RiHab: Arduino on {args.port or 'auto-detected port'}")
     print(f"API docs: http://localhost:{args.http_port}/docs   WebSocket: ws://localhost:{args.http_port}/ws")
     uvicorn.run(create_app(source, default_patient=args.patient), host=args.host, port=args.http_port, log_level="warning")
 

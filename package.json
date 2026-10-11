@@ -1,9 +1,8 @@
 {
   "name": "rihab",
   "private": true,
-  "description": "Run from the repo root: npm start (real Arduino) or npm run sim (no hardware).",
+  "description": "Run from the repo root with the Arduino plugged in: npm start",
   "scripts": {
-    "start": "node scripts/start.mjs",
-    "sim": "node scripts/start.mjs --sim"
+    "start": "node scripts/start.mjs"
   }
 }

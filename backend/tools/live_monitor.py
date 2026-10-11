@@ -1,6 +1,6 @@
 """Live terminal view of the RiHab server: knee angle, reps and comparison, as they happen.
 
-    python rihab_server.py                 # terminal 1 (or --sim without the brace)
+    python rihab_server.py                 # terminal 1, with the brace plugged in
     python tools/live_monitor.py           # terminal 2
 
 Keys: s start  x stop  h healthy knee  i injured knee  n new workout  e end workout  q quit
@@ -46,7 +46,7 @@ class Monitor:
         if not s.get("connected"):
             link = "waiting for Arduino"
         else:
-            link = "simulator" if s.get("source") == "sim" else s.get("port") or "?"
+            link = s.get("port") or "?"
         angle = smp.get("angle")
         filled = 0 if angle is None else max(0, min(BAR_WIDTH, round(angle / BAR_MAX_DEG * BAR_WIDTH)))
         bar = "#" * filled + "." * (BAR_WIDTH - filled)

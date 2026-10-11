@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { FLAG_ANGLE_CAL, FLAG_BATT_LOW, SERVER, api, type Knee, type Rihab, type Workout, useRihab } from "./lib/rihab";
+import {
+  FLAG_ANGLE_CAL, FLAG_BATT_LOW, SERVER, api, type Knee, type Measurement, type Rihab, type SampleTrace, type Workout, useRihab,
+} from "./lib/rihab";
 
 type IconName =
   | "activity"
@@ -190,7 +192,8 @@ function linkStatus(rihab: Rihab) {
   const s = rihab.state;
   if (!rihab.connected) return { ok: false, label: "Server offline", detail: "Start backend/rihab_server.py" };
   if (!s?.connected) return { ok: false, label: "Waiting for brace", detail: "Plug in the Arduino" };
-  return { ok: true, label: "Connected", detail: s.source === "sim" ? "Simulator" : (s.port ?? "USB") };
+  if (rihab.feed.hz === 0) return { ok: false, label: "No data", detail: "Brace plugged in but not sending" };
+  return { ok: true, label: "Connected", detail: s.port ?? "USB" };
 }
 
 // ---------------------------------------------------------------- layout
@@ -537,8 +540,13 @@ function LiveSession({ rihab }: { rihab: Rihab }) {
         </div>
         <div className="flex items-center gap-2">
           {uncalibrated && <span className="rounded-full bg-orange-soft px-2.5 py-1 text-xs font-bold text-orange">Not calibrated</span>}
+          {link.ok && (
+            <span className="rounded-full bg-canvas px-2.5 py-1 text-xs font-bold tabular-nums text-muted" title="Readings per second arriving from the brace">
+              Live · {rihab.feed.hz}/s
+            </span>
+          )}
           <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${s?.tracking ? "bg-success-soft text-success glow-live" : "bg-canvas text-muted"}`}>
-            {s?.tracking ? "Tracking" : "Paused"}
+            {s?.tracking ? "Tracking · recording" : "Paused"}
           </span>
         </div>
       </div>
@@ -599,7 +607,7 @@ function LiveSession({ rihab }: { rihab: Rihab }) {
               <Action
                 className={`${button} border border-line text-ink hover:bg-canvas`}
                 onClick={() => rihab.startWorkout(patient.trim() || s?.patient || "Patient")}
-                disabled={!rihab.connected}
+                disabled={!link.ok}
               >
                 New workout
               </Action>
@@ -860,7 +868,7 @@ function DeviceLog({ rihab }: { rihab: Rihab }) {
           <Text className="mt-1 text-sm text-muted">Messages from the brace and the server</Text>
         </div>
         <span className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-bold ${link.ok ? "bg-success-soft text-success" : "bg-rose-soft text-rose"}`}>
-          <Icon name={rihab.state?.source === "sim" ? "spark" : "device"} size="sm" />
+          <Icon name="device" size="sm" />
           {link.detail}
         </span>
       </div>
@@ -875,6 +883,315 @@ function DeviceLog({ rihab }: { rihab: Rihab }) {
         </ul>
       ) : (
         <Text className="text-sm text-muted">No messages yet.</Text>
+      )}
+    </article>
+  );
+}
+
+// ---------------------------------------------------------------- recorded workout
+
+const KNEE_COLOR: Record<Knee, string> = { healthy: "var(--color-brand)", injured: "var(--color-orange)" };
+const BRACE_HZ = 30;
+
+function median(values: number[]) {
+  if (!values.length) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+
+/** Seconds after the workout started when this rep finished. Readings are stored on the same clock. */
+const repEnd = (m: Measurement, performedAt: string) => (new Date(m.measured_at).getTime() - new Date(performedAt).getTime()) / 1000;
+
+/**
+ * Where each reading goes on the x axis. Time spent not tracking (between knees, or paused) is squeezed out,
+ * so the chart shows the movement rather than long flat gaps.
+ */
+function traceAxis(trace: SampleTrace) {
+  const n = trace.offset_s.length;
+  // Thinned traces have readings further apart, so a gap is "much longer than the usual spacing".
+  const gap = Math.max(1, (3 * trace.total) / Math.max(n, 1) / BRACE_HZ);
+  const pos = new Array<number>(n);
+  const breaks: boolean[] = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    const dt = i ? trace.offset_s[i] - trace.offset_s[i - 1] : 0;
+    breaks[i] = dt > gap;
+    pos[i] = i ? pos[i - 1] + (breaks[i] ? 0.5 : dt) : 0;
+  }
+  const at = (t: number) => {
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (trace.offset_s[mid] <= t) lo = mid;
+      else hi = mid - 1;
+    }
+    const next = Math.min(lo + 1, n - 1);
+    const room = next > lo && !breaks[next] ? pos[next] - pos[lo] : 0;
+    return pos[lo] + Math.min(Math.max(t - trace.offset_s[lo], 0), room);
+  };
+  return { pos, breaks, at, length: n ? pos[n - 1] : 0 };
+}
+
+function SessionTrace({ trace, reps, performedAt, selected, onSelect }: {
+  trace: SampleTrace; reps: Measurement[]; performedAt: string; selected: number | null; onSelect: (id: number) => void;
+}) {
+  const W = 600, H = 170;
+  const axis = traceAxis(trace);
+  const span = Math.max(axis.length, 1);
+  const top = Math.max(90, ...trace.angle) * 1.05;
+  const x = (p: number) => (p / span) * W;
+  const y = (a: number) => H - (Math.max(a, 0) / top) * (H - 8);
+
+  // One polyline per stretch of the same knee with no gap.
+  const runs: { knee: Knee; points: string[] }[] = [];
+  trace.angle.forEach((a, i) => {
+    const last = runs.at(-1);
+    const pt = `${x(axis.pos[i]).toFixed(1)},${y(a).toFixed(1)}`;
+    if (last && last.knee === trace.knee[i] && !axis.breaks[i]) last.points.push(pt);
+    else runs.push({ knee: trace.knee[i], points: [pt] });
+  });
+
+  return (
+    <div>
+      <div className="relative h-44 w-full">
+        <div className="pointer-events-none absolute inset-0 flex flex-col justify-between">
+          {[0, 1, 2, 3].map((line) => <div key={line} className="border-t border-dashed border-line" />)}
+        </div>
+        <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label="Knee angle for the whole workout">
+          {reps.map((m) => {
+            const end = repEnd(m, performedAt);
+            const x0 = x(axis.at(end - m.duration_s)), x1 = x(axis.at(end));
+            return (
+              <rect
+                key={m.id}
+                x={x0}
+                y={0}
+                width={Math.max(x1 - x0, 2)}
+                height={H}
+                fill={KNEE_COLOR[m.knee]}
+                fillOpacity={selected === m.id ? 0.22 : 0.07}
+                className="cursor-pointer"
+                onClick={() => onSelect(m.id)}
+              />
+            );
+          })}
+          {runs.map((r, i) => (
+            <polyline key={i} points={r.points.join(" ")} fill="none" stroke={KNEE_COLOR[r.knee]} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" className="pointer-events-none" />
+          ))}
+        </svg>
+        <span className="pointer-events-none absolute left-1 top-0 text-xs tabular-nums text-muted">{top.toFixed(0)}°</span>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
+        <span className="tabular-nums">0:00 tracked</span>
+        <span className="flex items-center gap-4">
+          {(["healthy", "injured"] as const).map((k) => (
+            <span key={k} className="flex items-center gap-1.5">
+              <span className="h-0.5 w-4 rounded-full" style={{ background: KNEE_COLOR[k] }} />
+              {KNEE_LABEL[k]}
+            </span>
+          ))}
+          <span>Shaded = a counted rep (click one)</span>
+        </span>
+        <span className="tabular-nums">{clock(axis.length)} tracked</span>
+      </div>
+    </div>
+  );
+}
+
+/** One rep's angle over time, next to a typical healthy rep from the same workout for comparison. */
+function RepCurve({ trace, rep, reference, performedAt }: {
+  trace: SampleTrace; rep: Measurement; reference: Measurement | null; performedAt: string;
+}) {
+  const W = 300, H = 140, PAD = 0.3;
+  const slice = (m: Measurement) => {
+    const end = repEnd(m, performedAt), start = end - m.duration_s;
+    const pts: [number, number][] = [];
+    trace.offset_s.forEach((t, i) => {
+      if (t >= start - PAD && t <= end + PAD) pts.push([t - start, trace.angle[i]]);
+    });
+    return pts;
+  };
+  const mine = slice(rep);
+  const ref = reference && reference.id !== rep.id ? slice(reference) : [];
+  const all = [...mine, ...ref];
+  if (mine.length < 2) return <Text className="text-sm text-muted">No readings were stored for this rep.</Text>;
+  const tMin = Math.min(...all.map((p) => p[0])), tMax = Math.max(...all.map((p) => p[0]));
+  const top = Math.max(60, ...all.map((p) => p[1])) * 1.05;
+  const toPts = (pts: [number, number][]) =>
+    pts.map(([t, a]) => `${(((t - tMin) / Math.max(tMax - tMin, 0.1)) * W).toFixed(1)},${(H - (Math.max(a, 0) / top) * (H - 6)).toFixed(1)}`).join(" ");
+
+  return (
+    <div>
+      <div className="relative h-36 w-full">
+        <div className="pointer-events-none absolute inset-0 flex flex-col justify-between">
+          {[0, 1, 2].map((line) => <div key={line} className="border-t border-dashed border-line" />)}
+        </div>
+        <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label="This rep's knee angle over time">
+          {ref.length > 1 && (
+            <polyline points={toPts(ref)} fill="none" stroke={KNEE_COLOR.healthy} strokeOpacity="0.6" strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" />
+          )}
+          <polyline points={toPts(mine)} fill="none" stroke={KNEE_COLOR[rep.knee]} strokeWidth="2.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        </svg>
+        <span className="pointer-events-none absolute left-1 top-0 text-xs tabular-nums text-muted">{top.toFixed(0)}°</span>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-muted">
+        <span className="flex items-center gap-1.5">
+          <span className="h-0.5 w-4 rounded-full" style={{ background: KNEE_COLOR[rep.knee] }} />
+          This rep
+        </span>
+        {ref.length > 1 && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-4 border-t-2 border-dashed" style={{ borderColor: KNEE_COLOR.healthy }} />
+            Typical healthy rep
+          </span>
+        )}
+        <span className="ml-auto tabular-nums">{(tMax - tMin).toFixed(1)} s</span>
+      </div>
+    </div>
+  );
+}
+
+function WorkoutDetail({ id, rihab, onClose }: { id: number; rihab: Rihab; onClose: () => void }) {
+  const [workout, setWorkout] = useState<Workout | null>(null);
+  const [trace, setTrace] = useState<SampleTrace | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const live = rihab.state?.workout_id === id;
+  const liveReps = live ? rihab.reps.length : 0;
+
+  // Reload when a rep lands in the workout being recorded right now.
+  useEffect(() => {
+    let stale = false;
+    Promise.all([api.workout(id), api.samples(id)])
+      .then(([w, t]) => {
+        if (stale) return;
+        setWorkout(w);
+        setTrace(t);
+        setError(null);
+      })
+      .catch((e) => !stale && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      stale = true;
+    };
+  }, [id, liveReps]);
+
+  const remove = async () => {
+    if (!window.confirm(`Delete workout #${id} and everything recorded in it? This can't be undone.`)) return;
+    try {
+      await api.deleteWorkout(id);
+      rihab.refreshHistory();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const reps = workout?.measurements ?? [];
+  const healthy = reps.filter((m) => m.knee === "healthy");
+  const hRom = median(healthy.map((m) => m.rom_deg));
+  const hTime = median(healthy.map((m) => m.duration_s));
+  // The healthy rep closest to the median range stands in as "typical".
+  const reference = hRom == null ? null : healthy.reduce((a, b) => (Math.abs(b.rom_deg - hRom) < Math.abs(a.rom_deg - hRom) ? b : a));
+  const rep = reps.find((m) => m.id === selected) ?? null;
+
+  const repNote = (m: Measurement) => {
+    if (m.knee !== "injured" || hRom == null || hTime == null) return null;
+    const slower = ((m.duration_s - hTime) / hTime) * 100;
+    return `${((m.rom_deg / hRom) * 100).toFixed(0)}% of healthy range, ${Math.abs(slower) < 5 ? "about the same speed" : `${Math.abs(slower).toFixed(0)}% ${slower > 0 ? "slower" : "faster"}`}`;
+  };
+
+  return (
+    <article className="rounded-2xl border border-edge bg-surface shadow-soft p-5 sm:p-6">
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <Text as="h2" className="font-display text-lg font-bold text-ink">
+            Workout #{id}{live && <span className="ml-2 rounded-full bg-success-soft px-2 py-0.5 align-middle text-xs font-bold text-success">Recording now</span>}
+          </Text>
+          <Text className="mt-1 text-sm text-muted">
+            {workout
+              ? `${workout.patient} · ${new Date(workout.performed_at).toLocaleString()} · ${workout.sample_count.toLocaleString()} readings from the brace`
+              : "Loading…"}
+          </Text>
+        </div>
+        <div className="flex gap-2">
+          <Action onClick={remove} className="rounded-xl border border-line px-3.5 py-2 text-sm font-semibold text-rose transition hover:bg-rose-soft">
+            Delete
+          </Action>
+          <Action onClick={onClose} className="rounded-xl border border-line px-3.5 py-2 text-sm font-semibold text-ink transition hover:bg-canvas">
+            Close
+          </Action>
+        </div>
+      </div>
+
+      {error && <Text className="mb-4 text-sm text-rose">Couldn't load this workout: {error}</Text>}
+
+      {workout?.summary && (
+        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl bg-canvas px-4 py-3">
+          <Text className="font-mono text-2xl font-extrabold tabular-nums text-ink">{fmt(workout.score)}</Text>
+          <Text className="text-xs font-semibold uppercase tracking-wide text-muted">score · {workout.status}</Text>
+          <Text className="min-w-0 flex-1 text-sm text-ink">{workout.summary}</Text>
+        </div>
+      )}
+
+      {trace && workout && (trace.total > 1 ? (
+        <SessionTrace trace={trace} reps={reps} performedAt={workout.performed_at} selected={selected} onSelect={setSelected} />
+      ) : (
+        <Text className="text-sm text-muted">No raw readings were stored for this workout (it was entered by hand or recorded before readings were saved).</Text>
+      ))}
+
+      {workout && reps.length > 0 && (
+        <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(16rem,1fr)]">
+          <div className="-mx-5 overflow-x-auto sm:mx-0">
+            <table className="w-full min-w-[28rem] text-left text-sm">
+              <thead className="text-xs font-semibold uppercase tracking-wide text-muted">
+                <tr className="border-b border-line">
+                  <th className="px-5 py-2 font-semibold sm:px-2">Rep</th>
+                  <th className="px-2 py-2 font-semibold">Knee</th>
+                  <th className="px-2 py-2 font-semibold">Range</th>
+                  <th className="px-2 py-2 font-semibold">Time</th>
+                  <th className="px-2 py-2 font-semibold">Shakiness</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reps.map((m, i) => (
+                  <tr
+                    key={m.id}
+                    onClick={() => setSelected(m.id)}
+                    className={`cursor-pointer border-b border-line last:border-0 ${selected === m.id ? "bg-brand-soft" : "hover:bg-canvas"}`}
+                  >
+                    <td className="px-5 py-2.5 tabular-nums text-muted sm:px-2">
+                      <Action onClick={() => setSelected(m.id)} label={`Show rep ${i + 1}`} className="tabular-nums">{i + 1}</Action>
+                    </td>
+                    <td className="px-2 py-2.5">
+                      <span className="flex items-center gap-1.5 text-ink">
+                        <span className="size-2 rounded-full" style={{ background: KNEE_COLOR[m.knee] }} />
+                        {m.knee === "healthy" ? "Healthy" : "Injured"}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2.5 tabular-nums font-semibold text-ink">{fmt(m.rom_deg, 0, "°")}</td>
+                    <td className="px-2 py-2.5 tabular-nums text-ink">{fmt(m.duration_s, 1, " s")}</td>
+                    <td className="px-2 py-2.5 tabular-nums text-muted">{fmt(m.flux, 0, " mg")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div>
+            {rep && trace ? (
+              <>
+                <Text className="mb-1 text-sm font-semibold text-ink">
+                  Rep {reps.indexOf(rep) + 1} · {KNEE_LABEL[rep.knee]} · {fmt(rep.rom_deg, 0, "°")} in {fmt(rep.duration_s, 1, " s")}
+                </Text>
+                <Text className="mb-3 text-xs text-muted">{repNote(rep) ?? (rep.knee === "healthy" ? "Healthy-knee baseline rep" : "No healthy reps in this workout to compare against")}</Text>
+                <RepCurve trace={trace} rep={rep} reference={reference} performedAt={workout.performed_at} />
+              </>
+            ) : (
+              <Text className="text-sm text-muted">Pick a rep in the table or on the chart to see its movement curve.</Text>
+            )}
+          </div>
+        </div>
       )}
     </article>
   );
@@ -945,9 +1262,9 @@ function OverviewView({ rihab }: { rihab: Rihab }) {
   );
 }
 
-function WorkoutHistory({ history }: { history: Workout[] }) {
+function WorkoutHistory({ history, selected, onSelect }: { history: Workout[]; selected: number | null; onSelect: (id: number) => void }) {
   return (
-    <Card title="Workout history" subtitle="Every recorded workout, newest first">
+    <Card title="Workout history" subtitle="Every recorded workout, newest first. Pick one to see its angle trace and reps.">
       {history.length ? (
         <div className="-mx-5 overflow-x-auto sm:-mx-6">
           <table className="w-full min-w-[36rem] text-left text-sm">
@@ -958,12 +1275,17 @@ function WorkoutHistory({ history }: { history: Workout[] }) {
                 <th className="px-3 py-2 font-semibold">Injured reps</th>
                 <th className="px-3 py-2 font-semibold">Score</th>
                 <th className="px-3 py-2 font-semibold">Status</th>
-                <th className="px-5 py-2 font-semibold sm:px-6">Felt</th>
+                <th className="px-3 py-2 font-semibold">Felt</th>
+                <th className="px-5 py-2 font-semibold sm:px-6"><span className="sr-only">Details</span></th>
               </tr>
             </thead>
             <tbody>
               {history.map((w) => (
-                <tr key={w.id} className="border-b border-line last:border-0">
+                <tr
+                  key={w.id}
+                  onClick={() => onSelect(w.id)}
+                  className={`cursor-pointer border-b border-line last:border-0 ${selected === w.id ? "bg-brand-soft" : "hover:bg-canvas"}`}
+                >
                   <td className="px-5 py-3 text-ink sm:px-6">
                     {new Date(w.performed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
                     {w.is_backdated && <span className="ml-2 text-xs text-muted">backdated</span>}
@@ -972,7 +1294,12 @@ function WorkoutHistory({ history }: { history: Workout[] }) {
                   <td className="px-3 py-3 tabular-nums text-ink">{w.injured_reps}</td>
                   <td className="px-3 py-3 tabular-nums font-semibold text-ink">{fmt(w.score)}</td>
                   <td className="px-3 py-3 text-muted">{w.status ?? "—"}</td>
-                  <td className="px-5 py-3 tabular-nums text-muted sm:px-6">{w.feeling == null ? "—" : `${w.feeling}/10`}</td>
+                  <td className="px-3 py-3 tabular-nums text-muted">{w.feeling == null ? "—" : `${w.feeling}/10`}</td>
+                  <td className="px-5 py-3 text-right sm:px-6">
+                    <Action onClick={() => onSelect(w.id)} label={`View workout ${w.id}`} className="text-xs font-semibold text-brand">
+                      View
+                    </Action>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -986,6 +1313,10 @@ function WorkoutHistory({ history }: { history: Workout[] }) {
 }
 
 function ActivityView({ rihab }: { rihab: Rihab }) {
+  const [selected, setSelected] = useState<number | null>(null);
+  // Forget a workout that was deleted (here or elsewhere).
+  const open = selected != null && rihab.history.some((w) => w.id === selected) ? selected : null;
+
   return (
     <>
       <PageIntro title="Activity">Your knee flexibility, reps over time and every workout you've logged.</PageIntro>
@@ -993,8 +1324,13 @@ function ActivityView({ rihab }: { rihab: Rihab }) {
         <MetricCard item={flexibilityMetric(rihab)} />
         <ActivityChart history={rihab.history} />
       </section>
+      {open != null && (
+        <section className="mt-5" aria-label="Workout details">
+          <WorkoutDetail key={open} id={open} rihab={rihab} onClose={() => setSelected(null)} />
+        </section>
+      )}
       <section className="mt-5" aria-label="Workout history">
-        <WorkoutHistory history={rihab.history} />
+        <WorkoutHistory history={rihab.history} selected={open} onSelect={setSelected} />
       </section>
     </>
   );
@@ -1504,8 +1840,10 @@ function DevicesView({ rihab }: { rihab: Rihab }) {
       <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(18rem,0.8fr)]" aria-label="Brace">
         <LiveSession rihab={rihab} />
         <Card title="Knee brace" subtitle={link.label}>
-          <DetailRow label="Source">{s ? (s.source === "sim" ? "Simulator" : "Arduino (USB)") : "—"}</DetailRow>
+          <DetailRow label="Source">{s ? "Arduino (USB)" : "—"}</DetailRow>
           <DetailRow label="Port">{s?.port ?? "—"}</DetailRow>
+          <DetailRow label="Readings">{s?.connected ? `${rihab.feed.hz} per second` : "—"}</DetailRow>
+          <DetailRow label="Last reading">{rihab.feed.lastAt ? new Date(rihab.feed.lastAt).toLocaleTimeString() : "—"}</DetailRow>
           <DetailRow label="Battery">{fmt(latest?.battery, 0, "%")}</DetailRow>
           <DetailRow label="Calibrated">{flags == null ? "—" : flags & FLAG_ANGLE_CAL ? "Yes" : "No"}</DetailRow>
           <DetailRow label="Reps counted by">{s ? (s.rep_mode === "device" ? "The brace" : "The server") : "—"}</DetailRow>
