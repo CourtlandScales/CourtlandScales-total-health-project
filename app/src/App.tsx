@@ -406,6 +406,20 @@ function flexibilityMetric(rihab: Rihab): Metric {
   };
 }
 
+/** What the check-in says back for each score, 1 (worst) to 10 (best). */
+const CHECKIN_MESSAGES = [
+  "That sounds really painful. Rest the knee, and contact your physical therapist if the pain doesn't settle",
+  "A rough one. Ice, elevate, and skip anything that makes the pain worse",
+  "Quite sore today. Take it easy and give the knee time to recover",
+  "A bit uncomfortable. Try fewer reps or a smaller range next time",
+  "Some discomfort, but manageable. Keep the next session gentle",
+  "Okay overall. Steady work like this adds up",
+  "A solid session. Listen to your body and keep the pace",
+  "Feeling good. Your knee is handling the work well",
+  "A strong session. Your recovery is showing",
+  "Felt great! Keep this momentum going",
+];
+
 function WorkoutCheckIn({ rihab }: { rihab: Rihab }) {
   // Check in on the open workout, or else the most recent one with reps.
   const target = rihab.state?.workout_id != null
@@ -416,7 +430,7 @@ function WorkoutCheckIn({ rihab }: { rihab: Rihab }) {
   const saved = target?.feeling ?? null;
   const score = draft && draft.workoutId === target?.id ? draft.score : saved ?? 7;
   const dirty = target != null && score !== saved;
-  const message = score <= 3 ? "Take it easy and prioritize recovery" : score <= 6 ? "A steady session—listen to your body" : "You are feeling strong after this session";
+  const message = CHECKIN_MESSAGES[score - 1];
   const Range = "input";
 
   const save = async () => {
@@ -464,7 +478,7 @@ function WorkoutCheckIn({ rihab }: { rihab: Rihab }) {
             onChange={(event) => target && setDraft({ workoutId: target.id, score: Number(event.target.value) })}
             className="h-2 w-full cursor-pointer appearance-none rounded-full bg-line accent-violet disabled:cursor-not-allowed disabled:opacity-40"
             aria-label="How you felt after your workout, from 1 to 10"
-            aria-valuetext={`${score} out of 10`}
+            aria-valuetext={`${score} out of 10: ${message}`}
           />
           <div className="mt-2 flex justify-between px-0.5 text-xs font-medium text-muted">
             {Array.from({ length: 10 }, (_, index) => <span key={index}>{index + 1}</span>)}
