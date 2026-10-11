@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { FLAG_ANGLE_CAL, FLAG_BATT_LOW, api, type Knee, type Rihab, type Workout, useRihab } from "./lib/rihab";
+import { useEffect, useState, type ReactNode } from "react";
+import { FLAG_ANGLE_CAL, FLAG_BATT_LOW, SERVER, api, type Knee, type Rihab, type Workout, useRihab } from "./lib/rihab";
 
 type IconName =
   | "activity"
@@ -122,16 +122,25 @@ function Action({
   onClick,
   label,
   disabled,
+  current,
 }: {
   children: ReactNode;
   className?: string;
   onClick?: () => void;
   label?: string;
   disabled?: boolean;
+  current?: boolean;
 }) {
   const Component = "button";
   return (
-    <Component type="button" className={`${className} disabled:cursor-not-allowed disabled:opacity-40`} onClick={onClick} aria-label={label} disabled={disabled}>
+    <Component
+      type="button"
+      className={`${className} disabled:cursor-not-allowed disabled:opacity-40`}
+      onClick={onClick}
+      aria-label={label}
+      aria-current={current ? "page" : undefined}
+      disabled={disabled}
+    >
       {children}
     </Component>
   );
@@ -179,14 +188,48 @@ function linkStatus(rihab: Rihab) {
 
 // ---------------------------------------------------------------- layout
 
-const navItems: { label: string; icon: IconName }[] = [
-  { label: "Overview", icon: "dashboard" },
-  { label: "Activity", icon: "activity" },
-  { label: "Workout / Stretches Coach", icon: "spark" },
-  { label: "Professionals Near You", icon: "user" },
-  { label: "Streak", icon: "flame" },
-  { label: "Devices", icon: "device" },
+type ViewId = "overview" | "activity" | "coach" | "professionals" | "streak" | "devices" | "settings";
+
+const navItems: { id: ViewId; label: string; icon: IconName }[] = [
+  { id: "overview", label: "Overview", icon: "dashboard" },
+  { id: "activity", label: "Activity", icon: "activity" },
+  { id: "coach", label: "Workout / Stretches Coach", icon: "spark" },
+  { id: "professionals", label: "Professionals Near You", icon: "user" },
+  { id: "streak", label: "Streak", icon: "flame" },
+  { id: "devices", label: "Devices", icon: "device" },
 ];
+
+const VIEW_TITLES: Record<ViewId, string> = {
+  overview: "Health overview",
+  activity: "Activity",
+  coach: "Workout / stretches coach",
+  professionals: "Professionals near you",
+  streak: "Streak",
+  devices: "Devices",
+  settings: "Settings",
+};
+
+const viewFromHash = (): ViewId => {
+  const id = window.location.hash.slice(1);
+  return id in VIEW_TITLES ? (id as ViewId) : "overview";
+};
+
+/** The open page lives in the URL hash, so back/forward and reloads keep it. */
+function useView() {
+  const [view, setView] = useState(viewFromHash);
+  useEffect(() => {
+    const onHash = () => {
+      setView(viewFromHash());
+      window.scrollTo({ top: 0 });
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const go = (id: ViewId) => {
+    window.location.hash = id;
+  };
+  return [view, go] as const;
+}
 
 function RiHabMark() {
   return (
@@ -197,8 +240,7 @@ function RiHabMark() {
   );
 }
 
-function Sidebar({ rihab }: { rihab: Rihab }) {
-  const [active, setActive] = useState("Overview");
+function Sidebar({ rihab, active, onNavigate }: { rihab: Rihab; active: ViewId; onNavigate: (id: ViewId) => void }) {
   const link = linkStatus(rihab);
   const battery = link.ok ? rihab.latest?.battery ?? null : null;
   const batteryLow = ((rihab.latest?.flags ?? 0) & FLAG_BATT_LOW) !== 0;
@@ -215,10 +257,11 @@ function Sidebar({ rihab }: { rihab: Rihab }) {
       <nav className="space-y-1.5" aria-label="Primary navigation">
         {navItems.map((item) => (
           <Action
-            key={item.label}
-            onClick={() => setActive(item.label)}
+            key={item.id}
+            onClick={() => onNavigate(item.id)}
+            current={active === item.id}
             className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold leading-5 transition ${
-              active === item.label ? "bg-brand-soft text-brand" : "text-muted hover:bg-canvas hover:text-ink"
+              active === item.id ? "bg-brand-soft text-brand" : "text-muted hover:bg-canvas hover:text-ink"
             }`}
           >
             <Icon name={item.icon} />
@@ -253,7 +296,13 @@ function Sidebar({ rihab }: { rihab: Rihab }) {
             </>
           )}
         </div>
-        <Action className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-muted hover:bg-canvas hover:text-ink">
+        <Action
+          onClick={() => onNavigate("settings")}
+          current={active === "settings"}
+          className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold transition ${
+            active === "settings" ? "bg-brand-soft text-brand" : "text-muted hover:bg-canvas hover:text-ink"
+          }`}
+        >
           <Icon name="settings" />
           Settings
         </Action>
@@ -289,37 +338,18 @@ function MetricCard({ item }: { item: Metric }) {
   );
 }
 
-function metricsFor(rihab: Rihab): Metric[] {
-  const latest = rihab.latest;
+function flexibilityMetric(rihab: Rihab): Metric {
   const injured = rihab.reps.filter((r) => r.knee === "injured");
   const counted = injured.length ? injured : rihab.reps;
   const bestRom = counted.length ? Math.max(...counted.map((r) => r.rom_deg)) : null;
-  return [
-    {
-      label: "Muscle activation",
-      value: fmt(latest?.emg, 0, "%"),
-      detail: latest?.emg == null ? "no EMG sensor yet" : "quad activation",
-      badge: null,
-      icon: "activity",
-      tone: "bg-orange-soft text-orange",
-    },
-    {
-      label: "Knee flexibility",
-      value: fmt(bestRom, 0, "°"),
-      detail: bestRom == null ? "no reps this workout" : `best ${injured.length ? "injured-knee " : ""}rep`,
-      badge: rihab.angle != null ? `Now ${rihab.angle}°` : null,
-      icon: "joint",
-      tone: "bg-brand-soft text-brand",
-    },
-    {
-      label: "Skin temperature",
-      value: fmt(latest?.temp, 1, "°"),
-      detail: latest?.temp == null ? "no temp sensor yet" : "°C at the knee",
-      badge: null,
-      icon: "thermometer",
-      tone: "bg-rose-soft text-rose",
-    },
-  ];
+  return {
+    label: "Knee flexibility",
+    value: fmt(bestRom, 0, "°"),
+    detail: bestRom == null ? "no reps this workout" : `best ${injured.length ? "injured-knee " : ""}rep`,
+    badge: rihab.angle != null ? `Now ${rihab.angle}°` : null,
+    icon: "joint",
+    tone: "bg-brand-soft text-brand",
+  };
 }
 
 function WorkoutCheckIn({ rihab }: { rihab: Rihab }) {
@@ -349,7 +379,7 @@ function WorkoutCheckIn({ rihab }: { rihab: Rihab }) {
   };
 
   return (
-    <article className="rounded-2xl border border-line bg-surface p-5 sm:col-span-2 sm:p-6 xl:col-span-3">
+    <article className="rounded-2xl border border-line bg-surface p-5 sm:p-6">
       <div className="flex flex-col gap-6 lg:flex-row lg:items-center">
         <div className="flex items-center gap-4 lg:w-72 lg:shrink-0">
           <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-violet-soft text-violet">
@@ -799,17 +829,447 @@ function DeviceLog({ rihab }: { rihab: Rihab }) {
   );
 }
 
+// ---------------------------------------------------------------- views
+
+function PageIntro({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="mb-8">
+      <Text as="h1" className="font-display text-3xl font-bold tracking-tight text-ink sm:text-4xl">{title}</Text>
+      <Text as="p" className="mt-2 text-sm text-muted sm:text-base">{children}</Text>
+    </div>
+  );
+}
+
+function Card({ title, subtitle, children, className = "" }: { title: string; subtitle?: string; children: ReactNode; className?: string }) {
+  return (
+    <article className={`rounded-2xl border border-line bg-surface p-5 sm:p-6 ${className}`}>
+      <div className="mb-5">
+        <Text as="h2" className="font-display text-lg font-bold text-ink">{title}</Text>
+        {subtitle && <Text className="mt-1 text-sm text-muted">{subtitle}</Text>}
+      </div>
+      {children}
+    </article>
+  );
+}
+
+function OverviewView({ rihab }: { rihab: Rihab }) {
+  const link = linkStatus(rihab);
+  const patient = rihab.state?.patient;
+
+  return (
+    <>
+      <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <Text as="h1" className="font-display text-3xl font-bold tracking-tight text-ink sm:text-4xl">Welcome back{patient ? `, ${patient}` : ""}</Text>
+          <Text as="p" className="mt-2 text-sm text-muted sm:text-base">Your body is ready for a strong day. Here&apos;s your progress.</Text>
+        </div>
+        <div className="flex items-center gap-2 self-start rounded-xl border border-line bg-surface px-3 py-2 text-xs font-semibold text-muted sm:self-auto">
+          <span className={`size-2 rounded-full ${link.ok ? "bg-success shadow-status" : "bg-rose"}`} />
+          {link.ok ? `Brace connected · ${link.detail}` : `${link.label} · ${link.detail}`}
+        </div>
+      </div>
+
+      <section aria-label="Knee flexibility">
+        <MetricCard item={flexibilityMetric(rihab)} />
+      </section>
+
+      <section className="mt-5" aria-label="Post-workout check-in">
+        <WorkoutCheckIn rihab={rihab} />
+      </section>
+
+      <section className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(18rem,0.8fr)]" aria-label="Live session">
+        <LiveSession rihab={rihab} />
+        <RecoveryScore rihab={rihab} />
+      </section>
+
+      <section className="mt-5" aria-label="Activity details">
+        <ActivityChart history={rihab.history} />
+      </section>
+
+      <section className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]" aria-label="Streak and device log">
+        <StreakSection history={rihab.history} />
+        <DeviceLog rihab={rihab} />
+      </section>
+    </>
+  );
+}
+
+function WorkoutHistory({ history }: { history: Workout[] }) {
+  return (
+    <Card title="Workout history" subtitle="Every recorded workout, newest first">
+      {history.length ? (
+        <div className="-mx-5 overflow-x-auto sm:-mx-6">
+          <table className="w-full min-w-[36rem] text-left text-sm">
+            <thead className="text-xs font-semibold uppercase tracking-wide text-muted">
+              <tr className="border-b border-line">
+                <th className="px-5 py-2 font-semibold sm:px-6">Date</th>
+                <th className="px-3 py-2 font-semibold">Healthy reps</th>
+                <th className="px-3 py-2 font-semibold">Injured reps</th>
+                <th className="px-3 py-2 font-semibold">Score</th>
+                <th className="px-3 py-2 font-semibold">Status</th>
+                <th className="px-5 py-2 font-semibold sm:px-6">Felt</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((w) => (
+                <tr key={w.id} className="border-b border-line last:border-0">
+                  <td className="px-5 py-3 text-ink sm:px-6">
+                    {new Date(w.performed_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                    {w.is_backdated && <span className="ml-2 text-xs text-muted">backdated</span>}
+                  </td>
+                  <td className="px-3 py-3 tabular-nums text-ink">{w.healthy_reps}</td>
+                  <td className="px-3 py-3 tabular-nums text-ink">{w.injured_reps}</td>
+                  <td className="px-3 py-3 tabular-nums font-semibold text-ink">{fmt(w.score)}</td>
+                  <td className="px-3 py-3 text-muted">{w.status ?? "—"}</td>
+                  <td className="px-5 py-3 tabular-nums text-muted sm:px-6">{w.feeling == null ? "—" : `${w.feeling}/10`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <Text className="text-sm text-muted">No workouts recorded yet.</Text>
+      )}
+    </Card>
+  );
+}
+
+function ActivityView({ rihab }: { rihab: Rihab }) {
+  return (
+    <>
+      <PageIntro title="Activity">Your knee flexibility, reps over time and every workout you've logged.</PageIntro>
+      <section className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[18rem_minmax(0,1fr)]" aria-label="Flexibility and reps over time">
+        <MetricCard item={flexibilityMetric(rihab)} />
+        <ActivityChart history={rihab.history} />
+      </section>
+      <section className="mt-5" aria-label="Workout history">
+        <WorkoutHistory history={rihab.history} />
+      </section>
+    </>
+  );
+}
+
+type Exercise = { name: string; focus: "Range of motion" | "Strength" | "Control"; dose: string; how: string };
+
+const EXERCISES: Exercise[] = [
+  { name: "Heel slides", focus: "Range of motion", dose: "2 × 10", how: "Lying on your back, slide your heel toward you to bend the knee as far as is comfortable, then slide it back out." },
+  { name: "Seated knee bends", focus: "Range of motion", dose: "2 × 10", how: "Sitting on a chair, slide your foot back under the seat to bend the knee, hold for 5 seconds, then return." },
+  { name: "Quad sets", focus: "Strength", dose: "3 × 10, 5 s hold", how: "Legs straight, tighten the thigh to press the back of your knee into the floor and hold." },
+  { name: "Straight leg raises", focus: "Strength", dose: "3 × 10", how: "Lock the knee straight, lift the leg to the height of the other bent knee, and lower it slowly." },
+  { name: "Mini squats", focus: "Control", dose: "2 × 10", how: "Holding a counter, bend both knees a little with your weight even, keeping each knee over your toes." },
+  { name: "Hamstring stretch", focus: "Range of motion", dose: "3 × 30 s", how: "Seated with the leg out straight, lean forward from the hips until you feel a gentle stretch behind the thigh." },
+];
+
+/** Which kind of exercise the latest comparison says to work on, if any. */
+function suggestedFocus(rihab: Rihab): Exercise["focus"] | null {
+  const c = rihab.comparison;
+  if (!c) return null;
+  if (c.angle_pct < 85) return "Range of motion";
+  if (c.flux_pct != null && c.flux_pct > 15) return "Control";
+  return "Strength";
+}
+
+function CoachView({ rihab }: { rihab: Rihab }) {
+  const focus = suggestedFocus(rihab);
+  const tone: Record<Exercise["focus"], string> = {
+    "Range of motion": "bg-brand-soft text-brand",
+    Strength: "bg-orange-soft text-orange",
+    Control: "bg-violet-soft text-violet",
+  };
+
+  return (
+    <>
+      <PageIntro title="Workout / stretches coach">
+        {focus
+          ? `Based on your latest workout, today's focus is ${focus.toLowerCase()}. Track your reps with the brace below.`
+          : "Do a few reps with each knee and the coach will suggest what to focus on."}
+      </PageIntro>
+
+      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-label="Exercises">
+        {EXERCISES.map((e) => (
+          <article key={e.name} className={`rounded-2xl border bg-surface p-5 ${e.focus === focus ? "border-brand" : "border-line"}`}>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${tone[e.focus]}`}>{e.focus}</span>
+              {e.focus === focus && <span className="text-xs font-bold text-brand">Suggested today</span>}
+            </div>
+            <Text as="h2" className="font-display text-lg font-bold text-ink">{e.name}</Text>
+            <Text className="mt-1 text-sm font-semibold text-muted">{e.dose}</Text>
+            <Text as="p" className="mt-3 text-sm leading-6 text-ink">{e.how}</Text>
+          </article>
+        ))}
+      </section>
+      <Text as="p" className="mt-3 text-xs text-muted">General guidance only. Follow the plan from your physical therapist, and stop if anything causes sharp pain.</Text>
+
+      <section className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(18rem,0.8fr)]" aria-label="Live session">
+        <LiveSession rihab={rihab} />
+        <RecoveryScore rihab={rihab} />
+      </section>
+      <section className="mt-5" aria-label="Check-in">
+        <WorkoutCheckIn rihab={rihab} />
+      </section>
+    </>
+  );
+}
+
+const PROFESSIONALS = [
+  { label: "Physical therapists", query: "physical therapist", detail: "Guided rehab and exercise plans" },
+  { label: "Orthopedic specialists", query: "orthopedic knee specialist", detail: "Diagnosis, imaging and surgery" },
+  { label: "Sports medicine", query: "sports medicine clinic", detail: "Return-to-sport care" },
+];
+
+function progressSummary(rihab: Rihab) {
+  const c = rihab.comparison;
+  const today = startOfDay(new Date());
+  const reps = repsBetween(rihab.history, addDays(today, -27), addDays(today, 1));
+  const felt = rihab.history.filter((w) => w.feeling != null).slice(0, 5);
+  const avgFelt = felt.length ? felt.reduce((n, w) => n + w.feeling!, 0) / felt.length : null;
+  const lines = [
+    `RiHab progress summary — ${rihab.state?.patient ?? "Patient"} (${new Date().toLocaleDateString()})`,
+    c ? `Recovery score: ${c.score.toFixed(0)}/100 (${c.status})` : "Recovery score: not measured yet",
+    c ? `Injured knee range: ${c.angle_pct.toFixed(0)}% of healthy (${c.injured_rom_deg.toFixed(0)}° vs ${c.healthy_rom_deg.toFixed(0)}°)` : null,
+    `Reps in the last 4 weeks: ${reps}`,
+    `Workouts logged: ${rihab.history.length}`,
+    avgFelt != null ? `Average post-workout feeling (last ${felt.length}): ${avgFelt.toFixed(1)}/10` : null,
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+type Coords = { lat: number; lng: number };
+
+/** Ask the browser for the user's location once; null if they decline or it's unavailable. */
+function locate(): Promise<Coords | null> {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      () => resolve(null),
+      { timeout: 8000, maximumAge: 10 * 60 * 1000 },
+    );
+  });
+}
+
+function mapSearch(query: string, at: Coords | null) {
+  return at ? `${query} near ${at.lat.toFixed(3)},${at.lng.toFixed(3)}` : `${query} near me`;
+}
+
+function ProfessionalsView({ rihab }: { rihab: Rihab }) {
+  const [copied, setCopied] = useState(false);
+  const [selected, setSelected] = useState<(typeof PROFESSIONALS)[number] | null>(null);
+  const [coords, setCoords] = useState<Coords | null | "pending">(null);
+  const [asked, setAsked] = useState(false);
+  const summary = progressSummary(rihab);
+  const at = coords === "pending" ? null : coords;
+  const search = selected ? mapSearch(selected.query, at) : "";
+
+  const choose = (p: (typeof PROFESSIONALS)[number]) => {
+    setSelected(p);
+    if (!asked) {
+      setAsked(true);
+      setCoords("pending");
+      locate().then(setCoords);
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(summary);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {
+      console.warn("RiHab: couldn't copy summary", e);
+    }
+  };
+
+  return (
+    <>
+      <PageIntro title="Professionals near you">Find knee specialists nearby, and bring your progress to the appointment.</PageIntro>
+      <section className="grid grid-cols-1 gap-4 sm:grid-cols-3" aria-label="Find a professional">
+        {PROFESSIONALS.map((p) => (
+          <Action
+            key={p.label}
+            onClick={() => choose(p)}
+            current={selected?.label === p.label}
+            className={`group flex items-center gap-4 rounded-2xl border bg-surface p-5 text-left transition hover:-translate-y-0.5 hover:shadow-card ${
+              selected?.label === p.label ? "border-brand" : "border-line"
+            }`}
+          >
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-brand-soft text-brand">
+              <Icon name="user" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <Text className="font-semibold text-ink">{p.label}</Text>
+              <Text className="mt-0.5 text-xs text-muted">{p.detail}</Text>
+            </div>
+            <span className="text-muted transition group-hover:text-ink"><Icon name="chevron" size="sm" /></span>
+          </Action>
+        ))}
+      </section>
+
+      {selected ? (
+        <section className="mt-5" aria-label="Map">
+          <article className="overflow-hidden rounded-2xl border border-line bg-surface">
+            <div className="flex flex-wrap items-center justify-between gap-3 p-5 sm:px-6">
+              <div>
+                <Text as="h2" className="font-display text-lg font-bold text-ink">{selected.label} near you</Text>
+                <Text className="mt-1 text-sm text-muted">
+                  {coords === "pending" ? "Finding your location…" : at ? "Using your current location" : "Location not shared, so this is a rough area"}
+                </Text>
+              </div>
+              <a
+                href={`https://www.google.com/maps/search/${encodeURIComponent(search)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-xl border border-line px-3.5 py-2 text-sm font-semibold text-ink transition hover:bg-canvas"
+              >
+                Open in Google Maps
+              </a>
+            </div>
+            {coords !== "pending" && (
+              <iframe
+                key={search}
+                title={`Map of ${selected.label.toLowerCase()} near you`}
+                src={`https://maps.google.com/maps?q=${encodeURIComponent(search)}&z=12&output=embed`}
+                className="block h-[28rem] w-full border-0 border-t border-line"
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+              />
+            )}
+          </article>
+        </section>
+      ) : (
+        <Text as="p" className="mt-3 text-xs text-muted">Pick a type of professional to see a map of clinics near you.</Text>
+      )}
+
+      <section className="mt-5" aria-label="Progress summary">
+        <Card title="Share your progress" subtitle="Copy this summary into a message or bring it to your appointment">
+          <pre className="whitespace-pre-wrap rounded-xl bg-canvas p-4 font-sans text-sm leading-6 text-ink">{summary}</pre>
+          <Action onClick={copy} className="mt-4 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-dark">
+            {copied ? "Copied" : "Copy summary"}
+          </Action>
+        </Card>
+      </section>
+    </>
+  );
+}
+
+function StreakCalendar({ history }: { history: Workout[] }) {
+  const today = startOfDay(new Date());
+  const monday = addDays(today, -((today.getDay() + 6) % 7) - 7 * 7);
+  const days = activeDays(history);
+  const grid = Array.from({ length: 8 * 7 }, (_, i) => addDays(monday, i));
+
+  return (
+    <Card title="Last 8 weeks" subtitle="Each filled square is a day with at least one rep">
+      <div className="grid grid-cols-7 gap-1.5">
+        {["M", "T", "W", "T", "F", "S", "S"].map((d, i) => (
+          <Text key={i} className="text-center text-xs font-semibold text-muted">{d}</Text>
+        ))}
+        {grid.map((d) => {
+          const future = d > today;
+          const done = days.has(d.getTime());
+          return (
+            <div
+              key={d.getTime()}
+              title={d.toLocaleDateString()}
+              className={`aspect-square rounded-md ${future ? "bg-transparent" : done ? "bg-brand" : "bg-canvas"} ${d.getTime() === today.getTime() ? "ring-2 ring-orange" : ""}`}
+            />
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function StreakView({ rihab }: { rihab: Rihab }) {
+  return (
+    <>
+      <PageIntro title="Streak">Exercising a little every day is what moves recovery forward.</PageIntro>
+      <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]" aria-label="Streak">
+        <StreakSection history={rihab.history} />
+        <StreakCalendar history={rihab.history} />
+      </section>
+    </>
+  );
+}
+
+function DetailRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-line py-3 text-sm last:border-0">
+      <span className="text-muted">{label}</span>
+      <span className="min-w-0 truncate text-right font-semibold text-ink">{children}</span>
+    </div>
+  );
+}
+
+function DevicesView({ rihab }: { rihab: Rihab }) {
+  const link = linkStatus(rihab);
+  const s = rihab.state;
+  const latest = rihab.latest;
+  const flags = latest?.flags;
+
+  return (
+    <>
+      <PageIntro title="Devices">Your knee brace, its connection, and what it's reporting.</PageIntro>
+      <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(18rem,0.8fr)]" aria-label="Brace">
+        <LiveSession rihab={rihab} />
+        <Card title="Knee brace" subtitle={link.label}>
+          <DetailRow label="Source">{s ? (s.source === "sim" ? "Simulator" : "Arduino (USB)") : "—"}</DetailRow>
+          <DetailRow label="Port">{s?.port ?? "—"}</DetailRow>
+          <DetailRow label="Battery">{fmt(latest?.battery, 0, "%")}</DetailRow>
+          <DetailRow label="Calibrated">{flags == null ? "—" : flags & FLAG_ANGLE_CAL ? "Yes" : "No"}</DetailRow>
+          <DetailRow label="Reps counted by">{s ? (s.rep_mode === "device" ? "The brace" : "The server") : "—"}</DetailRow>
+        </Card>
+      </section>
+      <section className="mt-5" aria-label="Device log">
+        <DeviceLog rihab={rihab} />
+      </section>
+    </>
+  );
+}
+
+function SettingsView({ rihab }: { rihab: Rihab }) {
+  const [patients, setPatients] = useState<{ id: number; name: string; injury: string | null }[] | null>(null);
+  useEffect(() => {
+    if (!rihab.connected) return;
+    api.patients().then(setPatients).catch((e) => console.warn("RiHab: couldn't load patients", e));
+  }, [rihab.connected]);
+
+  return (
+    <>
+      <PageIntro title="Settings">Connection and account details for this dashboard.</PageIntro>
+      <section className="grid grid-cols-1 gap-5 xl:grid-cols-2" aria-label="Settings">
+        <Card title="Server" subtitle="Change it with VITE_RIHAB_SERVER in app/.env.local">
+          <DetailRow label="Address">{SERVER}</DetailRow>
+          <DetailRow label="Status">{rihab.connected ? "Connected" : "Offline"}</DetailRow>
+          <DetailRow label="Brace">{linkStatus(rihab).label}</DetailRow>
+        </Card>
+        <Card title="Patients" subtitle="Start a new workout from the live session to switch patient">
+          {patients?.length ? (
+            patients.map((p) => (
+              <DetailRow key={p.id} label={p.name}>
+                {p.name === rihab.state?.patient ? <span className="text-brand">Current</span> : (p.injury ?? "")}
+              </DetailRow>
+            ))
+          ) : (
+            <Text className="text-sm text-muted">{rihab.connected ? "No patients yet." : "Connect to the server to see patients."}</Text>
+          )}
+        </Card>
+      </section>
+    </>
+  );
+}
+
 // ---------------------------------------------------------------- page
 
 export default function App() {
   const rihab = useRihab();
-  const link = linkStatus(rihab);
+  const [view, go] = useView();
   const patient = rihab.state?.patient;
   const injury = rihab.workout?.injury ?? rihab.history.find((w) => w.injury)?.injury;
 
   return (
     <main className="flex min-h-screen bg-canvas text-ink">
-      <Sidebar rihab={rihab} />
+      <Sidebar rihab={rihab} active={view} onNavigate={go} />
       <div className="min-w-0 flex-1">
         <header className="sticky top-0 z-20 flex h-20 items-center justify-between border-b border-line bg-canvas/90 px-5 backdrop-blur-xl sm:px-8 lg:px-10">
           <div className="flex items-center gap-3 lg:hidden">
@@ -822,15 +1282,15 @@ export default function App() {
             <Text className="text-xs font-semibold uppercase tracking-wide text-muted">
               {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
             </Text>
-            <Text className="mt-1 font-display text-lg font-bold text-ink">Health overview</Text>
+            <Text className="mt-1 font-display text-lg font-bold text-ink">{VIEW_TITLES[view]}</Text>
           </div>
           <div className="ml-auto flex items-center gap-3">
-            <Action className="relative flex size-10 items-center justify-center rounded-xl border border-line bg-surface text-muted transition hover:text-ink" label="Notifications">
+            <Action onClick={() => go("devices")} className="relative flex size-10 items-center justify-center rounded-xl border border-line bg-surface text-muted transition hover:text-ink" label="Notifications">
               <Icon name="bell" />
               {rihab.logs.some((l) => l.level !== "info") && <span className="absolute right-2.5 top-2.5 size-1.5 rounded-full bg-rose ring-2 ring-surface" />}
             </Action>
             <div className="h-8 w-px bg-line" />
-            <Action className="flex items-center gap-3 rounded-xl p-1.5 pr-2 hover:bg-surface">
+            <Action onClick={() => go("settings")} className="flex items-center gap-3 rounded-xl p-1.5 pr-2 hover:bg-surface">
               <div className="flex size-9 items-center justify-center rounded-xl bg-brand-soft text-brand">
                 <Icon name="user" />
               </div>
@@ -843,36 +1303,30 @@ export default function App() {
           </div>
         </header>
 
+        <nav className="flex gap-1.5 overflow-x-auto border-b border-line px-5 py-2 sm:px-8 lg:hidden" aria-label="Primary navigation">
+          {[...navItems, { id: "settings" as const, label: "Settings", icon: "settings" as const }].map((item) => (
+            <Action
+              key={item.id}
+              onClick={() => go(item.id)}
+              current={view === item.id}
+              className={`flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                view === item.id ? "bg-brand-soft text-brand" : "text-muted hover:bg-surface hover:text-ink"
+              }`}
+            >
+              <Icon name={item.icon} size="sm" />
+              {item.label}
+            </Action>
+          ))}
+        </nav>
+
         <div className="mx-auto max-w-screen-2xl px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
-          <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-            <div>
-              <Text as="h1" className="font-display text-3xl font-bold tracking-tight text-ink sm:text-4xl">Welcome back{patient ? `, ${patient}` : ""}</Text>
-              <Text as="p" className="mt-2 text-sm text-muted sm:text-base">Your body is ready for a strong day. Here&apos;s your progress.</Text>
-            </div>
-            <div className="flex items-center gap-2 self-start rounded-xl border border-line bg-surface px-3 py-2 text-xs font-semibold text-muted sm:self-auto">
-              <span className={`size-2 rounded-full ${link.ok ? "bg-success shadow-status" : "bg-rose"}`} />
-              {link.ok ? `Brace connected · ${link.detail}` : `${link.label} · ${link.detail}`}
-            </div>
-          </div>
-
-          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-label="Live health metrics">
-            {metricsFor(rihab).map((item) => <MetricCard key={item.label} item={item} />)}
-            <WorkoutCheckIn rihab={rihab} />
-          </section>
-
-          <section className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.8fr)_minmax(18rem,0.8fr)]" aria-label="Live session">
-            <LiveSession rihab={rihab} />
-            <RecoveryScore rihab={rihab} />
-          </section>
-
-          <section className="mt-5" aria-label="Activity details">
-            <ActivityChart history={rihab.history} />
-          </section>
-
-          <section className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]" aria-label="Streak and device log">
-            <StreakSection history={rihab.history} />
-            <DeviceLog rihab={rihab} />
-          </section>
+          {view === "overview" && <OverviewView rihab={rihab} />}
+          {view === "activity" && <ActivityView rihab={rihab} />}
+          {view === "coach" && <CoachView rihab={rihab} />}
+          {view === "professionals" && <ProfessionalsView rihab={rihab} />}
+          {view === "streak" && <StreakView rihab={rihab} />}
+          {view === "devices" && <DevicesView rihab={rihab} />}
+          {view === "settings" && <SettingsView rihab={rihab} />}
         </div>
       </div>
     </main>
